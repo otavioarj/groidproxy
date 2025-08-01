@@ -18,7 +18,7 @@ import (
 
 const (
 	CHAIN_NAME = "GROID_OUT"
-	VERSION    = "3.0.0"
+	VERSION    = "1.0.0"
 	SO_ORIGINAL_DST = 80
 )
 
@@ -33,6 +33,8 @@ type Config struct {
 	UseGlobal   bool
 	DNSRedirect bool
 	Verbose     bool
+	Stats       bool
+	Timeout     int
 }
 
 var config Config
@@ -45,6 +47,8 @@ func main() {
 	flag.BoolVar(&config.UseGlobal, "global", false, "Redirect all traffic")
 	flag.BoolVar(&config.DNSRedirect, "dns", false, "Also redirect DNS (port 53)")
 	flag.BoolVar(&config.Verbose, "v", false, "Verbose output")
+	flag.BoolVar(&config.Stats, "stats", false, "Show I/O statistics")
+	flag.IntVar(&config.Timeout, "timeout", 10, "Connection timeout in seconds")
 	
 	var flush, list bool
 	var remove string
@@ -54,14 +58,14 @@ func main() {
 	flag.StringVar(&remove, "remove", "", "Remove rules for package")
 	
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "GoDroid Proxy v%s - Android Transparent Proxy\n\n", VERSION)
+		fmt.Fprintf(os.Stderr, "GoDroid Proxy v%s - Golang Android Proxier\n\n", VERSION)
 		fmt.Fprintf(os.Stderr, "Usage: %s [options] [packages...]\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "Options:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nModes:\n")
-		fmt.Fprintf(os.Stderr, "  ip:port         - Direct redirect to transparent proxy\n")
-		fmt.Fprintf(os.Stderr, "  http://ip:port  - Local proxy using HTTP protocol\n")
-		fmt.Fprintf(os.Stderr, "  socks5://ip:port - Local proxy using SOCKS5 protocol\n")
+		fmt.Fprintf(os.Stderr, "  host:port          - Direct redirect to transparent proxy\n")
+		fmt.Fprintf(os.Stderr, "  http://host:port   - Local proxy using HTTP protocol\n")
+		fmt.Fprintf(os.Stderr, "  socks5://host:port - Local proxy using SOCKS5 protocol\n")
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
 		fmt.Fprintf(os.Stderr, "  %s -p 192.168.1.100:8888 com.example.app\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -p http://192.168.1.100:8080 com.android.chrome\n", os.Args[0])
@@ -137,6 +141,12 @@ func main() {
 		if config.Daemon {
 			daemonize()
 		}
+		
+		// If stats enabled, show iptables stats
+		if config.Stats {
+			go showIptablesStats()
+		}
+		
 		<-sigChan
 	} else {
 		// Start local proxy for http/socks5 modes
@@ -401,7 +411,7 @@ func handleClient(client net.Conn) {
 	// Connect to proxy
 	proxy, err := net.DialTimeout("tcp", 
 		fmt.Sprintf("%s:%d", config.ProxyHost, config.ProxyPort), 
-		10*time.Second)
+		time.Duration(config.Timeout)*time.Second)
 	if err != nil {
 		debugf("Failed to connect to proxy: %v", err)
 		return
@@ -430,9 +440,13 @@ func handleClient(client net.Conn) {
 		proxy.Write(firstData)
 	}
 	
-	// Relay data
-	go io.Copy(proxy, client)
-	io.Copy(client, proxy)
+	// Relay data with stats if enabled
+	if config.Stats {
+		relayWithStats(client, proxy, fmt.Sprintf("%s:%d", host, port))
+	} else {
+		go io.Copy(proxy, client)
+		io.Copy(client, proxy)
+	}
 }
 
 func setupHTTPProxy(proxy net.Conn, firstData []byte, host string, port int) error {
@@ -574,6 +588,117 @@ func getOriginalDst(conn net.Conn) (string, int, error) {
 	return ip.String(), port, nil
 }
 
+func relayWithStats(client, proxy net.Conn, target string) {
+	done := make(chan bool, 2)
+	var clientToProxy, proxyToClient int64
+	
+	// Client to Proxy
+	go func() {
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := client.Read(buf)
+			if err != nil {
+				break
+			}
+			
+			written, err := proxy.Write(buf[:n])
+			if err != nil {
+				break
+			}
+			
+			clientToProxy += int64(written)
+			printStats(target, clientToProxy, proxyToClient)
+		}
+		done <- true
+	}()
+	
+	// Proxy to Client
+	go func() {
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := proxy.Read(buf)
+			if err != nil {
+				break
+			}
+			
+			written, err := client.Write(buf[:n])
+			if err != nil {
+				break
+			}
+			
+			proxyToClient += int64(written)
+			printStats(target, clientToProxy, proxyToClient)
+		}
+		done <- true
+	}()
+	
+	// Wait for both directions to complete
+	<-done
+	<-done
+	
+	// Print final stats with newline
+	fmt.Printf("\r[%s] %s - TX: %s, RX: %s [CLOSED]\n", 
+		time.Now().Format("15:04:05"), 
+		target,
+		formatBytes(clientToProxy), 
+		formatBytes(proxyToClient))
+}
+
+func printStats(target string, tx, rx int64) {
+	fmt.Printf("\r[%s] %s - TX: %s, RX: %s", 
+		time.Now().Format("15:04:05"), 
+		target,
+		formatBytes(tx), 
+		formatBytes(rx))
+}
+
+func formatBytes(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
+func showIptablesStats() {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	
+	for range ticker.C {
+		// Get stats from GROID_OUT chain
+		out, err := exec.Command("iptables", "-t", "nat", "-L", CHAIN_NAME, "-n", "-v", "-x").Output()
+		if err != nil {
+			continue
+		}
+		
+		lines := strings.Split(string(out), "\n")
+		var totalPackets, totalBytes int64
+		
+		for _, line := range lines {
+			if strings.Contains(line, "DNAT") || strings.Contains(line, "REDIRECT") {
+				fields := strings.Fields(line)
+				if len(fields) >= 2 {
+					packets, _ := strconv.ParseInt(fields[0], 10, 64)
+					bytes, _ := strconv.ParseInt(fields[1], 10, 64)
+					totalPackets += packets
+					totalBytes += bytes
+				}
+			}
+		}
+		
+		fmt.Printf("\r[%s] Chain %s - Packets: %d, Data: %s", 
+			time.Now().Format("15:04:05"),
+			CHAIN_NAME,
+			totalPackets,
+			formatBytes(totalBytes))
+	}
+}
+
 func daemonize() {
 	if os.Getppid() != 1 {
 		cmd := exec.Command(os.Args[0], os.Args[1:]...)
@@ -593,7 +718,7 @@ func daemonize() {
 
 func runCmd(name string, args ...string) {
 	if err := exec.Command(name, args...).Run(); err != nil {
-		debugf("Command failed: %s %v", name, args)
+		logf("Command failed: %s %v", name, args)
 	}
 }
 
