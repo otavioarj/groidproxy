@@ -40,6 +40,8 @@ type Config struct {
 var config Config
 
 func main() {
+	var flush, list bool
+	var remove string
 	// Parse flags
 	flag.StringVar(&config.ProxyAddr, "p", "", "Proxy address (ip:port or http://ip:port or socks5://ip:port)")
 	flag.IntVar(&config.LocalPort, "local-port", 8123, "Local port for transparent proxy")
@@ -49,26 +51,22 @@ func main() {
 	flag.BoolVar(&config.Verbose, "v", false, "Verbose output")
 	flag.BoolVar(&config.Stats, "stats", false, "Show I/O statistics")
 	flag.IntVar(&config.Timeout, "timeout", 10, "Connection timeout in seconds")
-	
-	var flush, list bool
-	var remove string
-	
 	flag.BoolVar(&flush, "flush", false, "Remove all GROID rules")
 	flag.BoolVar(&list, "list", false, "List current rules")
 	flag.StringVar(&remove, "remove", "", "Remove rules for package")
 	
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "GoDroid Proxy v%s - Golang Android Proxier\n\n", VERSION)
+		fmt.Fprintf(os.Stderr, "GoDroid v%s - Golang Android Proxier\n\n", VERSION)
 		fmt.Fprintf(os.Stderr, "Usage: %s [options] [packages...]\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "Options:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nModes:\n")
-		fmt.Fprintf(os.Stderr, "  host:port          - Direct redirect to transparent proxy\n")
-		fmt.Fprintf(os.Stderr, "  http://host:port   - Local proxy using HTTP protocol\n")
-		fmt.Fprintf(os.Stderr, "  socks5://host:port - Local proxy using SOCKS5 protocol\n")
+		fmt.Fprintf(os.Stderr, "  host:port          - Redirect to a transparent proxy\n")
+		fmt.Fprintf(os.Stderr, "  http://host:port   - Local transparent to HTTP proxy \n")
+		fmt.Fprintf(os.Stderr, "  socks5://host:port - Local transparent to SOCKS5 proxy\n")
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
 		fmt.Fprintf(os.Stderr, "  %s -p 192.168.1.100:8888 com.example.app\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  %s -p http://192.168.1.100:8080 com.android.chrome\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -p http://192.168.1.100:8080 com.example.app com.android.chrome\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -p socks5://192.168.1.100:1080 -global\n", os.Args[0])
 	}
 	
@@ -77,19 +75,16 @@ func main() {
 	// Check root
 	if os.Geteuid() != 0 {
 		fatal("Must run as root")
-	}
-	
+	}	
 	// Handle special commands
 	if flush {
 		flushRules()
 		return
-	}
-	
+	}	
 	if list {
 		listRules()
 		return
-	}
-	
+	}	
 	if remove != "" {
 		removePackageRules(remove)
 		return
@@ -99,10 +94,8 @@ func main() {
 	if config.ProxyAddr == "" {
 		flag.Usage()
 		os.Exit(1)
-	}
-	
-	parseProxyAddr()
-	
+	}	
+	parseProxyAddr()	
 	// Get packages
 	if !config.UseGlobal {
 		config.Packages = flag.Args()
@@ -112,7 +105,7 @@ func main() {
 		}
 	}
 	
-	// Enable IP forwarding
+	// Enable IPv4 forwarding
 	exec.Command("sysctl", "-w", "net.ipv4.ip_forward=1").Run()
 	
 	// Setup signal handling
@@ -120,8 +113,7 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	
 	// Initialize iptables chain
-	initChain()
-	
+	initChain()	
 	// Apply rules
 	if config.UseGlobal {
 		applyGlobalRules()
@@ -136,6 +128,7 @@ func main() {
 	}
 	
 	// For redirect mode, just wait for signal
+	// this mode demands a upstream transparent proxy
 	if config.ProxyType == "redirect" {
 		logf("Direct redirect mode active to %s:%d", config.ProxyHost, config.ProxyPort)
 		if config.Daemon {
@@ -225,7 +218,7 @@ func getPackageUID(pkg string) int {
 		}
 	}
 	
-	logf("Warning: Could not find UID for package %s", pkg)
+	fatal("Could not find UID for package %s", pkg)
 	return 0
 }
 
@@ -429,12 +422,12 @@ func handleClient(client net.Conn) {
 	// Handle based on proxy type
 	if config.ProxyType == "http" {
 		if err := setupHTTPProxy(proxy, firstData, host, port); err != nil {
-			debugf("HTTP setup failed: %v", err)
+			logf("HTTP setup failed: %v", err)
 			return
 		}
 	} else if config.ProxyType == "socks5" {
 		if err := setupSOCKS5Proxy(proxy, host, port); err != nil {
-			debugf("SOCKS5 setup failed: %v", err)
+			logf("SOCKS5 setup failed: %v", err)
 			return
 		}
 		proxy.Write(firstData)
@@ -594,7 +587,7 @@ func relayWithStats(client, proxy net.Conn, target string) {
 	
 	// Client to Proxy
 	go func() {
-		buf := make([]byte, 32*1024)
+		buf := make([]byte, 4*1024)
 		for {
 			n, err := client.Read(buf)
 			if err != nil {
@@ -614,7 +607,7 @@ func relayWithStats(client, proxy net.Conn, target string) {
 	
 	// Proxy to Client
 	go func() {
-		buf := make([]byte, 32*1024)
+		buf := make([]byte, 4*1024)
 		for {
 			n, err := proxy.Read(buf)
 			if err != nil {
@@ -627,7 +620,7 @@ func relayWithStats(client, proxy net.Conn, target string) {
 			}
 			
 			proxyToClient += int64(written)
-			printStats(target, clientToProxy, proxyToClient)
+			go printStats(target, clientToProxy, proxyToClient)
 		}
 		done <- true
 	}()
@@ -666,7 +659,7 @@ func formatBytes(bytes int64) string {
 }
 
 func showIptablesStats() {
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	
 	for range ticker.C {
