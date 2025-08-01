@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	CHAIN_NAME = "PDROID_OUT"
+	CHAIN_NAME = "GROID_OUT"
 	VERSION    = "3.0.0"
 	SO_ORIGINAL_DST = 80
 )
@@ -49,7 +49,7 @@ func main() {
 	var flush, list bool
 	var remove string
 	
-	flag.BoolVar(&flush, "flush", false, "Remove all PDROID rules")
+	flag.BoolVar(&flush, "flush", false, "Remove all GROID rules")
 	flag.BoolVar(&list, "list", false, "List current rules")
 	flag.StringVar(&remove, "remove", "", "Remove rules for package")
 	
@@ -230,7 +230,7 @@ func initChain() {
 }
 
 func applyPackageRules(pkg string, uid int) {
-	comment := fmt.Sprintf("pdroid:%s", pkg)
+	comment := fmt.Sprintf("GROID:%s", pkg)
 	
 	if config.ProxyType == "redirect" {
 		// Direct DNAT redirect
@@ -274,7 +274,7 @@ func applyPackageRules(pkg string, uid int) {
 }
 
 func applyGlobalRules() {
-	comment := "pdroid:global"
+	comment := "GROID:global"
 	
 	if config.ProxyType == "redirect" {
 		// Direct DNAT redirect
@@ -304,14 +304,14 @@ func applyGlobalRules() {
 }
 
 func removePackageRules(pkg string) {
-	comment := fmt.Sprintf("pdroid:%s", pkg)
+	comment := fmt.Sprintf("GROID:%s", pkg)
 	removeRulesWithComment("nat", CHAIN_NAME, comment)
 	removeRulesWithComment("nat", "POSTROUTING", comment)
 	removeRulesWithComment("filter", "INPUT", comment)
 }
 
 func removeGlobalRules() {
-	comment := "pdroid:global"
+	comment := "GROID:global"
 	removeRulesWithComment("nat", CHAIN_NAME, comment)
 	removeRulesWithComment("nat", "POSTROUTING", comment)
 	removeRulesWithComment("filter", "INPUT", comment)
@@ -344,14 +344,14 @@ func removeRulesWithComment(table, chain, comment string) {
 
 func flushRules() {
 	exec.Command("iptables", "-t", "nat", "-F", CHAIN_NAME).Run()
-	removeRulesWithComment("nat", "OUTPUT", "pdroid:")
-	removeRulesWithComment("nat", "POSTROUTING", "pdroid:")
-	removeRulesWithComment("filter", "INPUT", "pdroid:")
-	logf("All PDROID rules flushed")
+	removeRulesWithComment("nat", "OUTPUT", "GROID:")
+	removeRulesWithComment("nat", "POSTROUTING", "GROID:")
+	removeRulesWithComment("filter", "INPUT", "GROID:")
+	logf("All GROID rules flushed")
 }
 
 func listRules() {
-	fmt.Println("=== PDROID Rules ===")
+	fmt.Println("=== GROID Rules ===")
 	
 	tables := []struct{ table, chain string }{
 		{"nat", CHAIN_NAME},
@@ -362,7 +362,7 @@ func listRules() {
 	
 	for _, tc := range tables {
 		out, _ := exec.Command("sh", "-c", 
-			fmt.Sprintf("iptables -t %s -L %s -n -v | grep pdroid", tc.table, tc.chain)).Output()
+			fmt.Sprintf("iptables -t %s -L %s -n -v | grep GROID", tc.table, tc.chain)).Output()
 		if len(out) > 0 {
 			fmt.Printf("\n%s table - %s chain:\n%s", tc.table, tc.chain, out)
 		}
