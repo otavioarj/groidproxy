@@ -43,7 +43,7 @@ func main() {
 	var flush, list bool
 	var remove string
 	// Parse flags
-	flag.StringVar(&config.ProxyAddr, "p", "", "Proxy address (ip:port or http://ip:port or socks5://ip:port)")
+	flag.StringVar(&config.ProxyAddr, "p", "", "Proxy address (host:port or http://host:port or socks5://host:port)")
 	flag.IntVar(&config.LocalPort, "local-port", 8123, "Local port for transparent proxy")
 	flag.BoolVar(&config.Daemon, "d", false, "Run as daemon")
 	flag.BoolVar(&config.UseGlobal, "global", false, "Redirect all traffic")
@@ -56,7 +56,7 @@ func main() {
 	flag.StringVar(&remove, "remove", "", "Remove rules for package")
 	
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "GoDroid v%s - Golang Android Proxier\n\n", VERSION)
+		fmt.Fprintf(os.Stderr, "Groid v%s - Golang Android Proxier\n\n", VERSION)
 		fmt.Fprintf(os.Stderr, "Usage: %s [options] [packages...]\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "Options:\n")
 		flag.PrintDefaults()
