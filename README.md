@@ -10,7 +10,7 @@
 
 | Flag               | Description                                                                                      					 |
 |--------------------|-------------------------------------------------------------------------------------------------------------|
-| `-blacklist string`| Comma-separated list of blocked hosts/IPs (`.domain.com` for wildcards)<br>❗Not supported in redirect mode |
+| `-blacklist string`| Comma-separated list of blocked hosts/IPs (`.domain.com` for wildcards)<br>❗Not supported in raw mode |
 | `-d`               | Run as daemon                                                                                   						 |
 | `-dns`             | Also redirect DNS (port 53)                                                                      					 |
 | `-flush`           | Remove all GROID rules                                                                           					 |
