@@ -10,7 +10,7 @@
 
 | Flag               | Description                                                                                      					 |
 |--------------------|-------------------------------------------------------------------------------------------------------------|
-| `-blacklist string`| Comma-separated list of blocked hosts/IPs (`.domain.com` for wildcards)<br>❗Not supported in raw mode |
+| `-blacklist string`| Comma-separated list of blocked hosts/IPs (`.domain.com` for wildcards)<br>❗Not supported in raw mode 		 |
 | `-d`               | Run as daemon                                                                                   						 |
 | `-dns`             | Also redirect DNS (port 53)                                                                      					 |
 | `-flush`           | Remove all GROID rules                                                                           					 |
@@ -25,7 +25,7 @@
 
 ## 🧰 Proxy Modes
 
-- `host:port` — Redirect TCP packets to an external transparent proxy  
+- `host:port` — Redirect TCP packets (raw redirect) to an external transparent proxy  
 - `http://host:port` — Transparent redirect to an HTTP proxy  
 - `socks5://host:port` — Transparent redirect to a SOCKS5 proxy
 
