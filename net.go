@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"syscall"
 	"time"
 	"unsafe"
@@ -279,4 +280,100 @@ func handleDirectTLS(client net.Conn, host string, port int) {
 
 	// Capture decrypted traffic
 	captureTLS(tlsClient, tlsServer, fmt.Sprintf("%s:%d", host, port))
+}
+
+func handleHTTPS(client net.Conn, connectData []byte) {
+	// Parse CONNECT request
+	lines := strings.Split(string(connectData), "\r\n")
+	if len(lines) < 1 {
+		return
+	}
+
+	parts := strings.Fields(lines[0])
+	if len(parts) < 2 {
+		return
+	}
+
+	targetHost := parts[1]
+
+	// Send 200 Connection established
+	client.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
+
+	// Generate certificate for target host
+	cert, err := generateCertForHost(targetHost)
+	if err != nil {
+		debugf("Failed to generate certificate: %v", err)
+		return
+	}
+
+	// TLS handshake with client
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{*cert},
+	}
+
+	tlsClient := tls.Server(client, tlsConfig)
+	if err := tlsClient.Handshake(); err != nil {
+		debugf("TLS handshake failed: %v", err)
+		return
+	}
+	defer tlsClient.Close()
+
+	// Connect to real server
+	var tlsServer *tls.Conn
+
+	if config.ProxyType == "capture" {
+		// Direct TLS connection
+		conn, err := tls.Dial("tcp", targetHost, &tls.Config{
+			InsecureSkipVerify: true,
+		})
+		if err != nil {
+			debugf("Failed to connect to server: %v", err)
+			return
+		}
+		tlsServer = conn
+	} else {
+		// Through proxy - establish CONNECT tunnel first
+		proxyConn, err := net.DialTimeout("tcp",
+			fmt.Sprintf("%s:%d", config.ProxyHost, config.ProxyPort),
+			time.Duration(config.Timeout)*time.Second)
+		if err != nil {
+			debugf("Failed to connect to proxy: %v", err)
+			return
+		}
+
+		// Send CONNECT through proxy
+		switch config.ProxyType {
+		case "http":
+			proxyConn.Write(connectData)
+			// Read response
+			resp := make([]byte, 1024)
+			n, _ := proxyConn.Read(resp)
+			if !bytes.Contains(resp[:n], []byte("200")) {
+				proxyConn.Close()
+				return
+			}
+		case "socks5":
+			// SOCKS5 setup
+			if err := setupSOCKS5Proxy(proxyConn, strings.Split(targetHost, ":")[0], 443); err != nil {
+				proxyConn.Close()
+				return
+			}
+		}
+
+		// Now upgrade to TLS
+		tlsServer = tls.Client(proxyConn, &tls.Config{
+			ServerName:         strings.Split(targetHost, ":")[0],
+			InsecureSkipVerify: true,
+		})
+
+		if err := tlsServer.Handshake(); err != nil {
+			debugf("Server TLS handshake failed: %v", err)
+			proxyConn.Close()
+			return
+		}
+	}
+	defer tlsServer.Close()
+
+	// Now both connections are TLS, capture decrypted data
+	captureTLS(tlsClient, tlsServer, targetHost)
 }
