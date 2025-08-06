@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -19,6 +20,12 @@ const (
 	VERSION         = "1.1.0"
 	SO_ORIGINAL_DST = 80
 )
+
+// debugConn wraps net.Conn to log all I/O operations
+type debugConn struct {
+	net.Conn
+	name string
+}
 
 type CaptureData struct {
 	Timestamp int64
@@ -82,7 +89,7 @@ func main() {
 	flag.BoolVar(&list, "list", false, "List current rules")
 	flag.StringVar(&remove, "remove", "", "Remove rules for package")
 	flag.StringVar(&config.Blacklist, "blacklist", "", "Comma-separated list of blocked hosts/IPs (use .domain.com for wildcards)\n[!] Doesn't work on raw redirect")
-	flag.StringVar(&config.SaveDB, "save", "/data/local/tmp/Groid.db", "Save traffic to a SQLite database\n[!] Doesn't work on raw redirect\n[*] Can work without external proxy, thus, no redirection only save app(s) traffic locally.")
+	flag.StringVar(&config.SaveDB, "save", "/data/local/tmp/Groid.db", "Save traffic to a SQLite database\n[!] Doesn't work on raw redirect\n[*] Can work without external proxy, thus no redirection, only saving app(s) traffic locally.")
 	flag.StringVar(&config.TLSCert, "tlscert", "", "PKCS12 certificate for TLS interception")
 	flag.StringVar(&config.TLSPass, "tlspass", "", "Password for PKCS12 certificate")
 

@@ -46,6 +46,11 @@ func initChain() {
 	// Create custom chain
 	exec.Command("iptables", "-t", "nat", "-N", CHAIN_NAME).Run()
 
+	// Exclude connections FROM local proxy port
+	exec.Command("iptables", "-t", "nat", "-A", CHAIN_NAME,
+		"-p", "tcp", "--sport", strconv.Itoa(config.LocalPort),
+		"-j", "RETURN").Run()
+
 	// Add to OUTPUT
 	if err := exec.Command("iptables", "-t", "nat", "-C", "OUTPUT", "-j", CHAIN_NAME).Run(); err != nil {
 		exec.Command("iptables", "-t", "nat", "-A", "OUTPUT", "-j", CHAIN_NAME).Run()

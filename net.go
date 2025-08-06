@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -12,11 +11,54 @@ import (
 	"unsafe"
 )
 
-func isTLSHandshake(data []byte) bool {
-	// TLS handshake começa com:
-	// - byte 0: 0x16 (Handshake)
-	// - byte 1-2: TLS version (0x03 0x01 para TLS 1.0, 0x03 0x03 para TLS 1.2)
-	return len(data) > 3 && data[0] == 0x16 && data[1] == 0x03
+func (d *debugConn) Read(b []byte) (n int, err error) {
+	n, err = d.Conn.Read(b)
+	if n > 0 {
+		debugf("%s READ: %d bytes [%02x %02x %02x %02x...]", d.name, n,
+			safeByteAt(b, 0), safeByteAt(b, 1), safeByteAt(b, 2), safeByteAt(b, 3))
+	} else {
+		debugf("%s READ: %d bytes, err: %v", d.name, n, err)
+	}
+	return
+}
+
+type prefixedConn struct {
+	net.Conn
+	prefixData []byte
+	prefixRead bool
+}
+
+// Need this as the client-tls conn we read it before-hand to grab if its a COONECT ou ClientHello
+func (p *prefixedConn) Read(b []byte) (n int, err error) {
+	if !p.prefixRead {
+		// First read: returns data already read
+		p.prefixRead = true
+		n = copy(b, p.prefixData)
+		return n, nil
+	}
+	// Reads normally
+	return p.Conn.Read(b)
+}
+
+func (d *debugConn) Write(b []byte) (n int, err error) {
+	debugf("%s WRITE: attempting %d bytes [%02x %02x %02x %02x...]", d.name, len(b),
+		safeByteAt(b, 0), safeByteAt(b, 1), safeByteAt(b, 2), safeByteAt(b, 3))
+
+	n, err = d.Conn.Write(b)
+
+	if err != nil {
+		debugf("%s WRITE: %d bytes written, err: %v", d.name, n, err)
+	} else {
+		debugf("%s WRITE: %d bytes written successfully", d.name, n)
+	}
+	return
+}
+
+func safeByteAt(b []byte, index int) byte {
+	if index < len(b) {
+		return b[index]
+	}
+	return 0x00
 }
 
 func handleClient(client net.Conn) {
@@ -92,21 +134,9 @@ func handleClientWithCapture(client net.Conn, host string, port int) {
 	// 1. CONNECT request (proxy mode)
 	// 2. TLS handshake
 
-	isHTTPS := false
-
-	if bytes.HasPrefix(firstData, []byte("CONNECT ")) || isTLSHandshake(firstData) {
-		isHTTPS = true
-	}
-
-	if isHTTPS && config.TLSCert != "" {
-		//
-		if !bytes.HasPrefix(firstData, []byte("CONNECT ")) {
-			// Client sent ClientHello, time for ServerHello
-			handleDirectTLS(client, host, port)
-		} else {
-			// // Check if it's HTTPS CONNECT
-			handleHTTPS(client, firstData)
-		}
+	if bytes.HasPrefix(firstData, []byte("CONNECT ")) || isTLSHandshake(firstData) && config.TLSCert != "" {
+		// Handle TLS with unified function
+		handleTLSConnection(client, host, port, firstData)
 		return
 	}
 
@@ -188,192 +218,75 @@ func getOriginalDst(conn net.Conn) (string, int, error) {
 	return ip.String(), port, nil
 }
 
-func handleDirectTLS(client net.Conn, host string, port int) {
-	// Generate cert - use a generic one for IP connections
-	certHost := host
-	if net.ParseIP(host) != nil {
-		// It's an IP, use a generic cert
-		certHost = "localhost"
-	}
-	debugf("CertHost: %s", certHost)
-	cert, err := generateCertForHost(certHost)
-	if err != nil {
-		debugf("Failed to generate certificate: %v", err)
-		return
-	}
-
-	// TLS config with GetConfigForClient to handle SNI
-	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{*cert},
-		GetConfigForClient: func(info *tls.ClientHelloInfo) (*tls.Config, error) {
-			debugf("Client SNI: %s", info.ServerName)
-			if info.ServerName != "" && info.ServerName != host {
-				// Client provided SNI, generate cert for that
-				newCert, err := generateCertForHost(info.ServerName)
-				if err != nil {
-					return nil, err
-				}
-				return &tls.Config{
-					Certificates: []tls.Certificate{*newCert},
-				}, nil
-			}
-			return nil, nil
-		},
-	}
-
-	// TLS handshake with client
-	tlsClient := tls.Server(client, tlsConfig)
-
-	// Connect to server FIRST (before client handshake)
-	var serverConn net.Conn
-	var tlsServer *tls.Conn
-
-	if config.ProxyType == "capture" {
-		// Direct connection
-		tlsServer, err = tls.Dial("tcp", fmt.Sprintf("%s:%d", host, port), &tls.Config{
-			InsecureSkipVerify: true,
-		})
-		if err != nil {
-			debugf("Failed to connect to server directly: %v", err)
-			return
-		}
-	} else {
-		// Through proxy
-		serverConn, err = net.DialTimeout("tcp",
-			fmt.Sprintf("%s:%d", config.ProxyHost, config.ProxyPort),
-			time.Duration(config.Timeout)*time.Second)
-		if err != nil {
-			debugf("Failed to connect to proxy: %v", err)
-			return
-		}
-
-		if config.ProxyType == "http" {
-			// Send CONNECT
-			connectReq := fmt.Sprintf("CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", host, port, host, port)
-			serverConn.Write([]byte(connectReq))
-
-			// Read response
-			resp := make([]byte, 1024)
-			n, _ := serverConn.Read(resp)
-			if !bytes.Contains(resp[:n], []byte("200")) {
-				debugf("Proxy CONNECT failed: %s", string(resp[:n]))
-				serverConn.Close()
-				return
-			}
-		}
-		// ... handle SOCKS5 needed!!
-
-		// Upgrade to TLS
-		tlsServer = tls.Client(serverConn, &tls.Config{
-			ServerName:         host,
-			InsecureSkipVerify: true,
-		})
-	}
-	defer tlsServer.Close()
-
-	// NOW do client handshake (after server is connected)
-	if err := tlsClient.Handshake(); err != nil {
-		debugf("Client TLS handshake failed: %v", err)
-		return
-	}
-	defer tlsClient.Close()
-
-	// Capture decrypted traffic
-	captureTLS(tlsClient, tlsServer, fmt.Sprintf("%s:%d", host, port))
-}
-
-func handleHTTPS(client net.Conn, connectData []byte) {
-	// Parse CONNECT request
+func parseConnectTarget(connectData []byte) string {
 	lines := strings.Split(string(connectData), "\r\n")
 	if len(lines) < 1 {
-		return
+		return ""
 	}
 
+	// Parse "CONNECT api.example.com:443 HTTP/1.1"
 	parts := strings.Fields(lines[0])
-	if len(parts) < 2 {
-		return
+	if len(parts) < 2 || !strings.HasPrefix(parts[0], "CONNECT") {
+		return ""
 	}
 
-	targetHost := parts[1]
+	// Extrair hostname da parte "host:port"
+	hostPort := parts[1]
+	if idx := strings.LastIndex(hostPort, ":"); idx != -1 {
+		return hostPort[:idx]
+	}
 
-	// Send 200 Connection established
-	client.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
+	return hostPort
+}
 
-	// Generate certificate for target host
-	cert, err := generateCertForHost(targetHost)
+func determineTargetHostname(host string, port int, connectData []byte, isConnectRequest bool) string {
+	if isConnectRequest {
+		// Modo proxy HTTP - extrair do CONNECT
+		return parseConnectTarget(connectData)
+	} else {
+		// Modo TLS direto - extrair SNI do ClientHello
+		if sni := extractSNIFromClientHello(connectData); sni != "" {
+			return sni
+		}
+		// Fallback para IP (não ideal)
+		return host
+	}
+}
+
+func handleTLSConnection(client net.Conn, host string, port int, connectData []byte) {
+	var isConnectRequest bool
+
+	// Parse target host
+	if connectData != nil && bytes.HasPrefix(connectData, []byte("CONNECT ")) {
+		// CONNECT request
+		isConnectRequest = true
+	}
+
+	if len(connectData) > 0 {
+		client = &prefixedConn{
+			Conn:       client,
+			prefixData: connectData,
+		}
+		debugf("Wrapped connection with %d bytes of prefix data", len(connectData))
+	}
+	realHostname := determineTargetHostname(host, port, connectData, isConnectRequest)
+	debugf("Handling TLS - Original: %s:%d, Real hostname: %s", host, port, realHostname)
+	// 2. Setup client TLS
+	tlsClient, err := setupClientTLSConnection(client, realHostname, isConnectRequest)
 	if err != nil {
-		debugf("Failed to generate certificate: %v", err)
-		return
-	}
-
-	// TLS handshake with client
-	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{*cert},
-	}
-
-	tlsClient := tls.Server(client, tlsConfig)
-	if err := tlsClient.Handshake(); err != nil {
-		debugf("TLS handshake failed: %v", err)
+		debugf("Failed to setup client TLS: %v", err)
 		return
 	}
 	defer tlsClient.Close()
 
-	// Connect to real server
-	var tlsServer *tls.Conn
-
-	if config.ProxyType == "capture" {
-		// Direct TLS connection
-		conn, err := tls.Dial("tcp", targetHost, &tls.Config{
-			InsecureSkipVerify: true,
-		})
-		if err != nil {
-			debugf("Failed to connect to server: %v", err)
-			return
-		}
-		tlsServer = conn
-	} else {
-		// Through proxy - establish CONNECT tunnel first
-		proxyConn, err := net.DialTimeout("tcp",
-			fmt.Sprintf("%s:%d", config.ProxyHost, config.ProxyPort),
-			time.Duration(config.Timeout)*time.Second)
-		if err != nil {
-			debugf("Failed to connect to proxy: %v", err)
-			return
-		}
-
-		// Send CONNECT through proxy
-		switch config.ProxyType {
-		case "http":
-			proxyConn.Write(connectData)
-			// Read response
-			resp := make([]byte, 1024)
-			n, _ := proxyConn.Read(resp)
-			if !bytes.Contains(resp[:n], []byte("200")) {
-				proxyConn.Close()
-				return
-			}
-		case "socks5":
-			// SOCKS5 setup
-			if err := setupSOCKS5Proxy(proxyConn, strings.Split(targetHost, ":")[0], 443); err != nil {
-				proxyConn.Close()
-				return
-			}
-		}
-
-		// Now upgrade to TLS
-		tlsServer = tls.Client(proxyConn, &tls.Config{
-			ServerName:         strings.Split(targetHost, ":")[0],
-			InsecureSkipVerify: true,
-		})
-
-		if err := tlsServer.Handshake(); err != nil {
-			debugf("Server TLS handshake failed: %v", err)
-			proxyConn.Close()
-			return
-		}
+	// 1. Setup server connection
+	tlsServer, err := setupServerTLSConnection(realHostname, host, port)
+	if err != nil {
+		debugf("Failed to setup server TLS: %v", err)
+		return
 	}
 	defer tlsServer.Close()
 
-	// Now both connections are TLS, capture decrypted data
-	captureTLS(tlsClient, tlsServer, targetHost)
+	// 3. Capture traffic
+	captureTLS(tlsClient, tlsServer, fmt.Sprintf("%s:%d", realHostname, port))
 }

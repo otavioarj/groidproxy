@@ -2,11 +2,12 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
-	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -77,14 +78,17 @@ func captureHTTP(client, server net.Conn, firstReq []byte, host string, port int
 	}
 }
 
-func captureTLS(client, server net.Conn, targetHost string) {
+func captureTLS(client, server *tls.Conn, targetHost string) {
+	debugf("Starting TLS capture for %s", targetHost)
+
 	done := make(chan bool, 2)
+	var requestBuffer bytes.Buffer
+	var mu sync.Mutex
 
-	// Buffer para acumular requisições parciais
-	var pendingRequest bytes.Buffer
-
-	// Client to Server
+	// Client -> Server (Request capture)
 	go func() {
+		defer func() { done <- true }()
+
 		buf := make([]byte, 4096)
 		for {
 			n, err := client.Read(buf)
@@ -92,134 +96,84 @@ func captureTLS(client, server net.Conn, targetHost string) {
 				break
 			}
 
-			data := buf[:n]
-			server.Write(data)
+			// Forward to server
+			server.Write(buf[:n])
 
-			// Acumula dados
-			pendingRequest.Write(data)
+			// Capture request data
+			mu.Lock()
+			requestBuffer.Write(buf[:n])
 
-			// Verifica se é início de requisição HTTP
-			reqData := pendingRequest.Bytes()
-			if isHTTPRequest(reqData) {
-				// Verifica se a requisição está completa
-				if req, complete := extractCompleteRequest(reqData); complete {
-					capture := &CaptureData{
-						Timestamp: time.Now().UnixNano(),
-					}
-
-					// Parse método e URL
-					if lines := strings.Split(string(req), "\r\n"); len(lines) > 0 {
-						parts := strings.Fields(lines[0])
-						if len(parts) >= 2 {
-							capture.Method = parts[0]
-							capture.URL = fmt.Sprintf("https://%s%s", targetHost, parts[1])
-						}
-					}
-
-					capture.Request = req
-
-					// Captura a resposta correspondente
-					go captureResponse(server, client, capture)
-
-					// Limpa buffer para próxima requisição
-					pendingRequest.Reset()
-				}
+			// Check if we have a complete HTTP request
+			if isCompleteHTTPMessage(requestBuffer.Bytes()) {
+				go captureAndSaveHTTPMessage(requestBuffer.Bytes(), nil, targetHost, "request")
+				requestBuffer.Reset()
 			}
+			mu.Unlock()
 		}
-		done <- true
 	}()
 
-	// Server to Client - apenas encaminha
+	// Server -> Client (Response capture)
 	go func() {
-		io.Copy(client, server)
-		done <- true
+		defer func() { done <- true }()
+
+		buf := make([]byte, 4096)
+		var responseBuffer bytes.Buffer
+
+		for {
+			n, err := server.Read(buf)
+			if err != nil {
+				break
+			}
+
+			// Forward to client
+			client.Write(buf[:n])
+
+			// Capture response data
+			responseBuffer.Write(buf[:n])
+
+			// Check if we have a complete HTTP response
+			if isCompleteHTTPMessage(responseBuffer.Bytes()) {
+				mu.Lock()
+				if requestBuffer.Len() > 0 {
+					go captureAndSaveHTTPMessage(requestBuffer.Bytes(), responseBuffer.Bytes(), targetHost, "pair")
+					requestBuffer.Reset()
+				}
+				mu.Unlock()
+				responseBuffer.Reset()
+			}
+		}
 	}()
 
+	// Wait for both directions
 	<-done
 	<-done
 }
 
-func isHTTPRequest(data []byte) bool {
-	str := string(data)
-	return strings.HasPrefix(str, "GET ") ||
-		strings.HasPrefix(str, "POST ") ||
-		strings.HasPrefix(str, "PUT ") ||
-		strings.HasPrefix(str, "DELETE ") ||
-		strings.HasPrefix(str, "HEAD ") ||
-		strings.HasPrefix(str, "OPTIONS ") ||
-		strings.HasPrefix(str, "PATCH ")
-}
-
-func extractCompleteRequest(data []byte) ([]byte, bool) {
-	// Encontra fim dos headers
-	headerEnd := bytes.Index(data, []byte("\r\n\r\n"))
-	if headerEnd == -1 {
-		return nil, false
+func captureAndSaveHTTPMessage(request, response []byte, targetHost, msgType string) {
+	capture := &CaptureData{
+		Timestamp: time.Now().UnixNano(),
 	}
 
-	headers := string(data[:headerEnd])
-	headerEndPos := headerEnd + 4
-
-	// Verifica Content-Length
-	if idx := strings.Index(strings.ToLower(headers), "content-length:"); idx != -1 {
-		// Extrai valor do Content-Length
-		start := idx + 15
-		end := strings.Index(headers[start:], "\r\n")
-		if end == -1 {
-			end = len(headers) - start
-		} else {
-			end += start
-		}
-
-		lengthStr := strings.TrimSpace(headers[start:end])
-		if contentLen, err := strconv.Atoi(lengthStr); err == nil {
-			// Verifica se temos o body completo
-			if len(data) >= headerEndPos+contentLen {
-				return data[:headerEndPos+contentLen], true
+	// Parse request
+	if len(request) > 0 {
+		if lines := strings.Split(string(request), "\r\n"); len(lines) > 0 {
+			parts := strings.Fields(lines[0])
+			if len(parts) >= 2 {
+				capture.Method = parts[0]
+				capture.URL = fmt.Sprintf("https://%s%s", targetHost, parts[1])
 			}
-			return nil, false
 		}
+		capture.Request = request
 	}
 
-	// Se não tem Content-Length, assume que não tem body
-	return data[:headerEndPos], true
-}
-
-func captureResponse(server, client net.Conn, capture *CaptureData) {
-	var respBuf bytes.Buffer
-	buf := make([]byte, 4096)
-
-	for respBuf.Len() < MAX_CAPTURE_SIZE {
-		n, err := server.Read(buf)
-		if err != nil {
-			break
-		}
-
-		respBuf.Write(buf[:n])
-		client.Write(buf[:n])
-
-		// Verifica se a resposta está completa
-		if resp, complete := extractCompleteRequest(respBuf.Bytes()); complete {
-			capture.Response = resp
-
-			// Envia para salvar
-			select {
-			case captureChan <- capture:
-			default:
-				debugf("Capture channel full")
-			}
-
-			// Continua encaminhando o resto sem capturar
-			io.Copy(client, server)
-			return
-		}
+	if response != nil {
+		capture.Response = response
 	}
 
-	// Se chegou ao limite, salva o que tem
-	capture.Response = respBuf.Bytes()
+	// Send to save channel
 	select {
 	case captureChan <- capture:
 	default:
-		debugf("Capture channel full")
+		debugf("Capture channel full, dropping message")
 	}
 }
