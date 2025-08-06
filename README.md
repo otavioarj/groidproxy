@@ -59,10 +59,10 @@ Groid is a transparent proxy for Android that intercepts and redirects applicati
 
 ```
 ┌─────────────┐    iptables    ┌──────────────────┐    TCP    ┌─────────────┐
-│ Android App │ ──────────────► │ DNAT Redirection │ ────────► │ Ext. Proxy  │
+│ Android App │ ──────────────►│ DNAT Redirection │ ────────► │ Ext. Proxy  │
 └─────────────┘                └──────────────────┘           └─────────────┘
       │                                                              │
-      │                        Raw TCP Passthrough                  │
+      │                        Raw TCP Passthrough                   │
       └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -78,17 +78,17 @@ Groid is a transparent proxy for Android that intercepts and redirects applicati
 
 ```
 ┌─────────────┐    iptables    ┌──────────────────┐    HTTP     ┌─────────────┐
-│ Android App │ ──────────────► │ Local Proxy      │ ──────────► │ HTTP Proxy  │
+│ Android App │ ──────────────►│ Local Proxy      │ ──────────► │ HTTP Proxy  │
 └─────────────┘                │ (Port 8123)      │  CONNECT    └─────────────┘
       │                        └──────────────────┘                    │
       │                                │                               │
       │        Transparent TCP         │        HTTP Protocol          │
       └────────────────────────────────┼───────────────────────────────┘
-                                      │
-                               ┌──────▼──────┐
-                               │ HTTP Parser │
-                               │ & Relay     │
-                               └─────────────┘
+                                       │
+                                ┌──────▼──────┐
+                                │ HTTP Parser │
+                                │ & Relay     │
+                                └─────────────┘
 ```
 
 **Data Flow:**
@@ -103,17 +103,17 @@ Groid is a transparent proxy for Android that intercepts and redirects applicati
 
 ```
 ┌─────────────┐    iptables    ┌──────────────────┐   SOCKS5    ┌─────────────┐
-│ Android App │ ──────────────► │ Local Proxy      │ ──────────► │ SOCKS5 Proxy│
+│ Android App │ ──────────────►│ Local Proxy      │ ──────────► │ SOCKS5 Proxy│
 └─────────────┘                │ (Port 8123)      │ Handshake   └─────────────┘
       │                        └──────────────────┘                    │
       │                                │                               │
       │        Transparent TCP         │     SOCKS5 Protocol           │
       └────────────────────────────────┼───────────────────────────────┘
-                                      │
-                               ┌──────▼──────┐
-                               │ SOCKS5      │
-                               │ Handler     │
-                               └─────────────┘
+                                       │
+                                ┌──────▼──────┐
+                                │ SOCKS5      │
+                                │ Handler     │
+                                └─────────────┘
 ```
 
 **Protocol Flow:**
@@ -130,57 +130,57 @@ Groid is a transparent proxy for Android that intercepts and redirects applicati
 
 ```
 ┌─────────────┐    iptables    ┌──────────────────┐   Direct   ┌─────────────┐
-│ Android App │ ──────────────► │ TLS Interceptor  │ ─────────► │ Target      │
+│ Android App │ ──────────────►│ TLS Interceptor  │ ─────────► │ Target      │
 └─────────────┘                │ (Port 8123)      │    TLS     │ Server      │
       │                        └──────────────────┘            └─────────────┘
       │                                │
       │           TLS Tunnel 1         │         TLS Tunnel 2
       └────────────────────────────────┼─────────────────────────────────────
-                                      │
-                              ┌───────▼────────┐
-                              │ TLS Interceptor│
-                              │ ┌─────────────┐ │
-                              │ │ Certificate │ │
-                              │ │ Generator   │ │
-                              │ └─────────────┘ │
-                              │ ┌─────────────┐ │
-                              │ │ HTTPPairer  │ │
-                              │ │ FIFO Queue  │ │
-                              │ └─────────────┘ │
-                              │ ┌─────────────┐ │
-                              │ │ SQLite      │ │
-                              │ │ Worker      │ │
-                              │ └─────────────┘ │
-                              └────────────────┘
+                                       │
+                               ┌───────▼─────────┐
+                               │ TLS Interceptor │
+                               │ ┌─────────────┐ │
+                               │ │ Certificate │ │
+                               │ │ Generator   │ │
+                               │ └─────────────┘ │
+                               │ ┌─────────────┐ │
+                               │ │ HTTPPairer  │ │
+                               │ │ FIFO Queue  │ │
+                               │ └─────────────┘ │
+                               │ ┌─────────────┐ │
+                               │ │ SQLite      │ │
+                               │ │ Worker      │ │
+                               │ └─────────────┘ │
+                               └─────────────────┘
 ```
 
 #### 4.2 Capture + Proxy Mode (`-save database.db -p http://host:port`)
 
 ```
 ┌─────────────┐    iptables    ┌──────────────────┐    HTTP     ┌─────────────┐   ┌─────────────┐
-│ Android App │ ──────────────► │ TLS Interceptor  │ ──────────► │ HTTP Proxy  │──►│ Target      │
+│ Android App │ ──────────────►│ TLS Interceptor  │ ──────────► │ HTTP Proxy  │──►│ Target      │
 └─────────────┘                │ (Port 8123)      │  CONNECT    └─────────────┘   │ Server      │
       │                        └──────────────────┘                               └─────────────┘
       │                                │
       │           TLS Tunnel 1         │         TLS Tunnel 2
       └────────────────────────────────┼─────────────────────────────────────────────────────────
-                                      │
-                              ┌───────▼────────┐
-                              │ TLS Interceptor│
-                              │ ┌─────────────┐ │
-                              │ │ SNI Extract │ │
-                              │ │ & Cert Gen  │ │
-                              │ └─────────────┘ │
-                              │ ┌─────────────┐ │
-                              │ │ HTTPPairer  │ │
-                              │ │ Req/Resp    │ │
-                              │ │ Correlation │ │
-                              │ └─────────────┘ │
-                              │ ┌─────────────┐ │
-                              │ │ SQLite DB   │ │
-                              │ │ Async Save  │ │
-                              │ └─────────────┘ │
-                              └────────────────┘
+                                       │
+                               ┌───────▼─────────┐
+                               │ TLS Interceptor │
+                               │ ┌─────────────┐ │
+                               │ │ SNI Extract │ │
+                               │ │ & Cert Gen  │ │
+                               │ └─────────────┘ │
+                               │ ┌─────────────┐ │
+                               │ │ HTTPPairer  │ │
+                               │ │ Req/Resp    │ │
+                               │ │ Correlation │ │
+                               │ └─────────────┘ │
+                               │ ┌─────────────┐ │
+                               │ │ SQLite DB   │ │
+                               │ │ Async Save  │ │
+                               │ └─────────────┘ │
+                               └─────────────────┘
 ```
 
 ---
@@ -205,7 +205,7 @@ Groid is a transparent proxy for Android that intercepts and redirects applicati
                                     │ Signed by Root CA │
                                     └─────────┬─────────┘
                                               │
-┌─────────────────┐   ServerHello + Cert     │
+┌─────────────────┐   ServerHello + Cert      │
 │   Android App   │ ◄─────────────────────────┘
 └─────────────────┘
 ```
