@@ -1,20 +1,48 @@
 package main
 
 import (
+	"crypto/tls"
+	"crypto/x509"
+	"database/sql"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 )
 
 const (
 	CHAIN_NAME      = "GROID_OUT"
-	VERSION         = "1.0.2"
+	VERSION         = "1.1.0"
 	SO_ORIGINAL_DST = 80
 )
+
+type CaptureData struct {
+	Timestamp int64
+	Method    string
+	URL       string
+	Request   []byte
+	Response  []byte
+}
+
+type CertCache struct {
+	mu    sync.RWMutex
+	certs map[string]*tls.Certificate
+}
+
+var (
+	db          *sql.DB
+	captureChan chan *CaptureData
+	saveWg      sync.WaitGroup
+	caCert      *x509.Certificate
+	caKey       interface{}
+	certCache   = &CertCache{certs: make(map[string]*tls.Certificate)}
+)
+
+const MAX_CAPTURE_SIZE = 10 * 1024 * 1024 // 10MB
 
 type Config struct {
 	Packages    []string
@@ -30,6 +58,9 @@ type Config struct {
 	Stats       bool
 	Timeout     int
 	Blacklist   string
+	SaveDB      string
+	TLSCert     string
+	TLSPass     string
 }
 
 var config Config
@@ -50,7 +81,10 @@ func main() {
 	flag.BoolVar(&flush, "flush", false, "Remove all GROID rules")
 	flag.BoolVar(&list, "list", false, "List current rules")
 	flag.StringVar(&remove, "remove", "", "Remove rules for package")
-	flag.StringVar(&config.Blacklist, "blacklist", "", "Comma-separated list of blocked hosts/IPs (use .domain.com for wildcards)\n[!] Doesn't work on raw mode")
+	flag.StringVar(&config.Blacklist, "blacklist", "", "Comma-separated list of blocked hosts/IPs (use .domain.com for wildcards)\n[!] Doesn't work on raw redirect")
+	flag.StringVar(&config.SaveDB, "save", "/data/local/tmp/Groid.db", "Save traffic to a SQLite database\n[!] Doesn't work on raw redirect\n[*] Can work without external proxy, thus, no redirection only save app(s) traffic locally.")
+	flag.StringVar(&config.TLSCert, "tlscert", "", "PKCS12 certificate for TLS interception")
+	flag.StringVar(&config.TLSPass, "tlspass", "", "Password for PKCS12 certificate")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Groid v%s - Golang Android Proxier\n\n", VERSION)
@@ -89,11 +123,31 @@ func main() {
 	}
 
 	// Parse proxy address
-	if config.ProxyAddr == "" {
+	if config.ProxyAddr == "" && config.SaveDB == "" {
 		flag.Usage()
 		os.Exit(1)
 	}
 	parseProxyAddr()
+
+	// Initialize database if save flag is set
+	if config.SaveDB != "" {
+		if err := initDatabase(config.SaveDB); err != nil {
+			fatal("Failed to initialize database: %v", err)
+		}
+		defer closeDatabase()
+		logf("Saving traffic to %s", config.SaveDB)
+
+		// Load TLS certificate if provided
+		if config.TLSCert != "" {
+			if err := loadP12Certificate(config.TLSCert, config.TLSPass); err != nil {
+				fatal("Failed to load TLS certificate: %v", err)
+			}
+			logf("TLS interception enabled")
+		} else {
+			logf("TLS interception is NOT configured, saving encrypted (TLS) data!!")
+		}
+	}
+
 	// Get packages
 	if !config.UseGlobal {
 		config.Packages = flag.Args()
@@ -143,6 +197,9 @@ func main() {
 	// For redirect mode, just wait for signal
 	// this mode demands a upstream transparent proxy
 	if config.ProxyType == "redirect" {
+		if config.SaveDB != "" {
+			logf("Warning: -save flag is ignored in redirect mode")
+		}
 		logf("Direct redirect mode active to %s:%d", config.ProxyHost, config.ProxyPort)
 		if config.Daemon {
 			daemonize()
@@ -155,13 +212,19 @@ func main() {
 
 		<-sigChan
 	} else {
-		// Start local proxy for http/socks5 modes
+		// Start local proxy for http/socks5/capture modes
 		if config.Daemon {
 			daemonize()
 		}
-
 		go runProxy()
-		logf("Started %s proxy on port %d", config.ProxyType, config.LocalPort)
+		if config.ProxyType == "capture" {
+			logf("Started capture mode on port %d", config.LocalPort)
+		} else {
+			logf("Started %s proxy on port %d", config.ProxyType, config.LocalPort)
+		}
+		if len(blacklistMap) > 0 {
+			logf("Blacklist active with %d entries", len(blacklistMap))
+		}
 		<-sigChan
 	}
 

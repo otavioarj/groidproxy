@@ -199,6 +199,13 @@ func runProxy() {
 }
 
 func parseProxyAddr() {
+	if config.ProxyAddr == "" && config.SaveDB != "" {
+		config.ProxyType = "capture"
+		return
+	}
+	if config.ProxyAddr == "" {
+		return
+	}
 	addr := config.ProxyAddr
 
 	// Determine proxy type

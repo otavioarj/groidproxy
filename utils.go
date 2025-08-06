@@ -156,7 +156,7 @@ func fatal(format string, args ...interface{}) {
 }
 
 func isBlacklisted(host string) bool {
-	if blacklistMap == nil || len(blacklistMap) == 0 {
+	if len(blacklistMap) == 0 {
 		return false
 	}
 	// Check exact match
@@ -170,4 +170,13 @@ func isBlacklisted(host string) bool {
 		}
 	}
 	return false
+}
+
+func debugCapturedData(capture *CaptureData) {
+	fmt.Printf("=== CAPTURE DEBUG ===\n")
+	fmt.Printf("Method: %s\n", capture.Method)
+	fmt.Printf("URL: %s\n", capture.URL)
+	fmt.Printf("Request (first 200 chars):\n%s\n", string(capture.Request[:min(200, len(capture.Request))]))
+	fmt.Printf("Response (first 200 chars):\n%s\n", string(capture.Response[:min(200, len(capture.Response))]))
+	fmt.Printf("==================\n")
 }
