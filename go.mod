@@ -2,11 +2,9 @@ module groidproxy
 
 go 1.23.5
 
-require (
-	github.com/mattn/go-sqlite3 v1.14.30
-	golang.org/x/crypto v0.40.0
-	modernc.org/sqlite v1.38.2
-)
+require modernc.org/sqlite v1.38.2
+
+require golang.org/x/crypto v0.40.0 // indirect
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
