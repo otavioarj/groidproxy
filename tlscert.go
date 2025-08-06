@@ -19,9 +19,9 @@ import (
 )
 
 func isTLSHandshake(data []byte) bool {
-	// TLS handshake começa com:
+	// TLS handshake starts with:
 	// - byte 0: 0x16 (Handshake)
-	// - byte 1-2: TLS version (0x03 0x01 para TLS 1.0, 0x03 0x03 para TLS 1.2)
+	// - byte 1-2: TLS version (0x03 0x01 == TLS 1.0, 0x03 0x03 == TLS 1.2)
 	return len(data) > 3 && data[0] == 0x16 && data[1] == 0x03
 }
 
@@ -31,7 +31,7 @@ func loadP12Certificate(certPath, password string) error {
 		return fmt.Errorf("failed to read P12 file: %v", err)
 	}
 
-	blocks, err := pkcs12.ToPEM(p12Data, password)
+	blocks, err := pkcs12.ToPEM(p12Data, password) //deprecated function, invalid for PKC#8
 	if err != nil {
 		return fmt.Errorf("failed to parse P12: %v", err)
 	}
@@ -129,9 +129,9 @@ func setupServerTLSConnection(hostName, hostIP string, port int) (*tls.Conn, err
 			debugf("DNS/Connect failed for hostname %s: %v", hostName, err)
 			debugf("Trying fallback to original IP %s", hostIP)
 
-			// Fallback: usar IP original mas manter SNI correto
+			// Fallback: original (client host) IP, but fixing SNI
 			tlsConn, err = tls.Dial("tcp", fmt.Sprintf("%s:%d", hostIP, port), &tls.Config{
-				ServerName:         hostName, // SNI correto (hostname)
+				ServerName:         hostName, // SNI (hostname)
 				InsecureSkipVerify: true,
 			})
 
@@ -178,6 +178,7 @@ func setupServerTLSConnection(hostName, hostIP string, port int) (*tls.Conn, err
 	}
 
 	// Upgrade to TLS and do handshake
+	// UNTESTED with socks5!!
 	tlsServer := tls.Client(serverConn, &tls.Config{
 		ServerName:         hostName,
 		InsecureSkipVerify: true,
@@ -216,7 +217,7 @@ func setupClientTLSConnection(client net.Conn, targetHost string, isConnectReque
 		}
 	}
 
-	// Generate certificate for target host
+	// Generate certificate for target host (CA - per host)
 	cert, err := generateCertForHost(targetHost)
 	if err != nil {
 		logf("Certificate generation failed for %s: %v", targetHost, err)
@@ -224,10 +225,10 @@ func setupClientTLSConnection(client net.Conn, targetHost string, isConnectReque
 	}
 	debugf("Certificate generated successfully for: %s", targetHost)
 
-	// TLS config with comprehensive options
+	// TLS config with comprehensive options: supporting everything
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{*cert},
-		NextProtos:   []string{"http/1.1"},
+		NextProtos:   []string{"http/1.1"}, // Forcing http/1.1, httpworkers (HTTPPairer) cannot sync HTTP2 state machine!
 		MinVersion:   tls.VersionTLS10,
 		MaxVersion:   tls.VersionTLS13,
 		CipherSuites: []uint16{
@@ -381,7 +382,7 @@ func parseSNIExtension(data []byte) string {
 		pos += 3
 
 		if nameType == 0x00 && pos+nameLen <= len(data) {
-			// found host
+			// found host?
 			hostname := string(data[pos : pos+nameLen])
 			if len(hostname) > 0 && strings.Contains(hostname, ".") {
 				return hostname

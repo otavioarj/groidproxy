@@ -154,33 +154,3 @@ func captureTLS(client, server *tls.Conn, targetHost string) {
 
 	debugf("TLS capture ended for %s", targetHost)
 }
-
-/*
-func captureAndSaveHTTPMessage(request, response []byte, targetHost, msgType string) {
-	capture := &CaptureData{
-		Timestamp: time.Now().UnixNano(),
-	}
-
-	// Parse request
-	if len(request) > 0 {
-		if lines := strings.Split(string(request), "\r\n"); len(lines) > 0 {
-			parts := strings.Fields(lines[0])
-			if len(parts) >= 2 {
-				capture.Method = parts[0]
-				capture.URL = fmt.Sprintf("https://%s%s", targetHost, parts[1])
-			}
-		}
-		capture.Request = request
-	}
-
-	if response != nil {
-		capture.Response = response
-	}
-
-	// Send to save channel
-	select {
-	case captureChan <- capture:
-	default:
-		debugf("Capture channel full, dropping message")
-	}
-}*/

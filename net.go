@@ -230,7 +230,7 @@ func parseConnectTarget(connectData []byte) string {
 		return ""
 	}
 
-	// Extrair hostname da parte "host:port"
+	// Extract hostname from "host:port"
 	hostPort := parts[1]
 	if idx := strings.LastIndex(hostPort, ":"); idx != -1 {
 		return hostPort[:idx]
@@ -239,16 +239,17 @@ func parseConnectTarget(connectData []byte) string {
 	return hostPort
 }
 
-func determineTargetHostname(host string, port int, connectData []byte, isConnectRequest bool) string {
+func determineTargetHostname(host string, connectData []byte, isConnectRequest bool) string {
 	if isConnectRequest {
-		// Modo proxy HTTP - extrair do CONNECT
+		// Proxy HTTP - extract from CONNECT
 		return parseConnectTarget(connectData)
 	} else {
-		// Modo TLS direto - extrair SNI do ClientHello
+		// Direct TLS handshake - extract SNI from ClientHello
 		if sni := extractSNIFromClientHello(connectData); sni != "" {
 			return sni
 		}
-		// Fallback para IP (não ideal)
+		// Fallback to IP - add a fatal() here?
+		debugf("No hostName from TLS context!")
 		return host
 	}
 }
@@ -269,7 +270,7 @@ func handleTLSConnection(client net.Conn, host string, port int, connectData []b
 		}
 		debugf("Wrapped connection with %d bytes of prefix data", len(connectData))
 	}
-	realHostname := determineTargetHostname(host, port, connectData, isConnectRequest)
+	realHostname := determineTargetHostname(host, connectData, isConnectRequest)
 	debugf("Handling TLS - Original: %s:%d, Real hostname: %s", host, port, realHostname)
 	// 2. Setup client TLS
 	tlsClient, err := setupClientTLSConnection(client, realHostname, isConnectRequest)

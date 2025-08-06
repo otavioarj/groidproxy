@@ -90,6 +90,7 @@ func setupHTTPProxy(proxy net.Conn, firstData []byte, host string, port int) err
 	return nil
 }
 
+// Doesn't support IPV6 hehe :(
 func setupSOCKS5Proxy(proxy net.Conn, host string, port int) error {
 	// SOCKS5 handshake
 	proxy.Write([]byte{0x05, 0x01, 0x00}) // Version 5, 1 method, no auth
