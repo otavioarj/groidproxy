@@ -2,6 +2,10 @@ package main
 
 import (
 	"bytes"
+	"compress/flate"
+	"compress/gzip"
+	"fmt"
+	"io"
 	"strconv"
 	"strings"
 )
@@ -199,4 +203,79 @@ func parseChunkSize(line string) int {
 	}
 
 	return int(size)
+}
+
+func parseHTTPRequestLine(data []byte) (method, url string) {
+	// Find first line (until \r\n)
+	firstLineEnd := bytes.Index(data, []byte("\r\n"))
+	if firstLineEnd == -1 {
+		return "", ""
+	}
+
+	firstLine := string(data[:firstLineEnd])
+	parts := strings.Fields(firstLine)
+
+	if len(parts) < 2 {
+		return "", ""
+	}
+
+	return strings.ToUpper(parts[0]), parts[1]
+}
+
+// decompressHTTPBody decompresses HTTP body based on Content-Encoding
+func decompressHTTPBody(body []byte, encoding string) ([]byte, error) {
+	var decodedBody bytes.Buffer
+	bodyReader := bytes.NewReader(body)
+
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "", "identity":
+		return body, nil // No compression
+
+	case "gzip":
+		gzipReader, err := gzip.NewReader(bodyReader)
+		if err != nil {
+			return body, fmt.Errorf("failed to create gzip reader: %v", err)
+		}
+		defer gzipReader.Close()
+
+		_, err = io.Copy(&decodedBody, gzipReader)
+		if err != nil {
+			return body, fmt.Errorf("failed to decompress gzip: %v", err)
+		}
+
+	case "deflate":
+		deflateReader := flate.NewReader(bodyReader)
+		defer deflateReader.Close()
+
+		_, err := io.Copy(&decodedBody, deflateReader)
+		if err != nil {
+			return body, fmt.Errorf("failed to decompress deflate: %v", err)
+		}
+
+	default:
+		debugf("Unsupported encoding: %s, saving compressed", encoding)
+		return body, nil // Return compressed data
+	}
+
+	return decodedBody.Bytes(), nil
+}
+
+// getHTTPBody extracts the body portion from complete HTTP message
+func getHTTPBody(httpData []byte) []byte {
+	headerEnd := bytes.Index(httpData, []byte("\r\n\r\n"))
+	if headerEnd == -1 {
+		return nil // No body found
+	}
+	return httpData[headerEnd+4:]
+}
+
+// replaceHTTPBody replaces the body in HTTP message with new body
+func replaceHTTPBody(httpData []byte, newBody []byte) []byte {
+	headerEnd := bytes.Index(httpData, []byte("\r\n\r\n"))
+	if headerEnd == -1 {
+		return httpData // Return original if no body separator found
+	}
+
+	headers := httpData[:headerEnd+4] // Include \r\n\r\n
+	return append(headers, newBody...)
 }

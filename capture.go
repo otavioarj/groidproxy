@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -79,40 +78,44 @@ func captureHTTP(client, server net.Conn, firstReq []byte, host string, port int
 }
 
 func captureTLS(client, server *tls.Conn, targetHost string) {
-	debugf("Starting TLS capture for %s", targetHost)
+	debugf("Starting TLS capture with HTTP pairing for %s", targetHost)
 
 	done := make(chan bool, 2)
-	var requestBuffer bytes.Buffer
-	var mu sync.Mutex
 
-	// Client -> Server (Request capture)
+	// Client to Server (Request capture)
 	go func() {
 		defer func() { done <- true }()
 
 		buf := make([]byte, 4096)
+		var requestBuffer bytes.Buffer
+
 		for {
 			n, err := client.Read(buf)
 			if err != nil {
 				break
 			}
 
-			// Forward to server
+			// Forward to server immediately (relay is priority)
 			server.Write(buf[:n])
 
-			// Capture request data
-			mu.Lock()
+			// Accumulate request data for capture
 			requestBuffer.Write(buf[:n])
 
 			// Check if we have a complete HTTP request
 			if isCompleteHTTPMessage(requestBuffer.Bytes()) {
-				go captureAndSaveHTTPMessage(requestBuffer.Bytes(), nil, targetHost, "request")
+				// Add complete request to pairing queue
+				httpPairer.addRequest(requestBuffer.Bytes(), targetHost)
 				requestBuffer.Reset()
 			}
-			mu.Unlock()
+		}
+
+		// Handle any remaining partial request data
+		if requestBuffer.Len() > 0 {
+			debugf("Partial request data remaining: %d bytes for %s", requestBuffer.Len(), targetHost)
 		}
 	}()
 
-	// Server -> Client (Response capture)
+	// Server to Client (Response capture)
 	go func() {
 		defer func() { done <- true }()
 
@@ -125,30 +128,34 @@ func captureTLS(client, server *tls.Conn, targetHost string) {
 				break
 			}
 
-			// Forward to client
+			// Forward to client immediately (relay is priority)
 			client.Write(buf[:n])
 
-			// Capture response data
+			// Accumulate response data for capture
 			responseBuffer.Write(buf[:n])
 
 			// Check if we have a complete HTTP response
 			if isCompleteHTTPMessage(responseBuffer.Bytes()) {
-				mu.Lock()
-				if requestBuffer.Len() > 0 {
-					go captureAndSaveHTTPMessage(requestBuffer.Bytes(), responseBuffer.Bytes(), targetHost, "pair")
-					requestBuffer.Reset()
-				}
-				mu.Unlock()
+				// Add complete response to pairing system
+				httpPairer.addResponse(responseBuffer.Bytes(), targetHost)
 				responseBuffer.Reset()
 			}
 		}
+
+		// Handle any remaining partial response data
+		if responseBuffer.Len() > 0 {
+			debugf("Partial response data remaining: %d bytes for %s", responseBuffer.Len(), targetHost)
+		}
 	}()
 
-	// Wait for both directions
+	// Wait for both directions to complete
 	<-done
 	<-done
+
+	debugf("TLS capture ended for %s", targetHost)
 }
 
+/*
 func captureAndSaveHTTPMessage(request, response []byte, targetHost, msgType string) {
 	capture := &CaptureData{
 		Timestamp: time.Now().UnixNano(),
@@ -176,4 +183,4 @@ func captureAndSaveHTTPMessage(request, response []byte, targetHost, msgType str
 	default:
 		debugf("Capture channel full, dropping message")
 	}
-}
+}*/

@@ -17,9 +17,29 @@ import (
 
 const (
 	CHAIN_NAME      = "GROID_OUT"
-	VERSION         = "1.1.0"
+	VERSION         = "1.2.0"
 	SO_ORIGINAL_DST = 80
 )
+
+// HTTPPair represents a complete HTTP request/response pair
+type HTTPPair struct {
+	Request   []byte // Complete HTTP request data
+	Response  []byte // Complete HTTP response data
+	Timestamp int64  // Request timestamp in nanoseconds
+	Host      string // Target hostname
+	Method    string // HTTP method (GET, POST, etc.)
+	URL       string // Request URL path
+}
+
+// HTTPPairer manages HTTP request/response pairing with FIFO queue
+type HTTPPairer struct {
+	mu          sync.Mutex    // Protects pending queue
+	pending     []HTTPPair    // FIFO queue of pending requests
+	saveChannel chan HTTPPair // Channel for completed pairs
+}
+
+// Global HTTP pairer instance
+var httpPairer *HTTPPairer
 
 // debugConn wraps net.Conn to log all I/O operations
 type debugConn struct {
@@ -89,12 +109,11 @@ func main() {
 	flag.BoolVar(&list, "list", false, "List current rules")
 	flag.StringVar(&remove, "remove", "", "Remove rules for package")
 	flag.StringVar(&config.Blacklist, "blacklist", "", "Comma-separated list of blocked hosts/IPs (use .domain.com for wildcards)\n[!] Doesn't work on raw redirect")
-	flag.StringVar(&config.SaveDB, "save", "/data/local/tmp/Groid.db", "Save traffic to a SQLite database\n[!] Doesn't work on raw redirect\n[*] Can work without external proxy, thus no redirection, only saving app(s) traffic locally.")
-	flag.StringVar(&config.TLSCert, "tlscert", "", "PKCS12 certificate for TLS interception")
+	flag.StringVar(&config.SaveDB, "save", "/data/local/tmp/Groid.db", "Save traffic to a SQLite database\n[!] Doesn't work on raw redirect\n[*] Can work without external proxy, only saving app(s) traffic locally.")
+	flag.StringVar(&config.TLSCert, "tlscert", "", "PKCS12 certificate for TLS interception AND CA per-host!")
 	flag.StringVar(&config.TLSPass, "tlspass", "", "Password for PKCS12 certificate")
 
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Groid v%s - Golang Android Proxier\n\n", VERSION)
 		fmt.Fprintf(os.Stderr, "Usage: %s [options] [packages...]\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "Options:\n")
 		flag.PrintDefaults()
@@ -102,14 +121,23 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  host:port          - Redirect TCP package (raw redirect) to an external transparent proxy\n")
 		fmt.Fprintf(os.Stderr, "  http://host:port   - Local transparent to HTTP proxy \n")
 		fmt.Fprintf(os.Stderr, "  socks5://host:port - Local transparent to SOCKS5 proxy\n")
+		fmt.Fprintf(os.Stderr, "  save /path/base.db - Save all HTTP traffic app <=> server to base.db\n")
+		fmt.Fprintf(os.Stderr, "   |-> Can work without upstream-proxy \n")
+		fmt.Fprintf(os.Stderr, "   |-> With TLS (PKS12) certificate saves clear data\n")
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
 		fmt.Fprintf(os.Stderr, "  %s -p 192.168.1.100:8888 com.example.app\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -p http://192.168.1.100:8080 com.example.app com.android.chrome\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -p socks5://192.168.1.100:1080 -global\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -p socks5://192.168.1.100:1080 -blacklist \"facebook.com,.youtube.com\" com.example.app\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -p http://192.168.1.100:1080 -save /data/local/tmp/Example.db -tlscert burp.pk12 -tlspass pass com.example.app\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -save /data/local/tmp/Example.db -tlscert burp.pk12 -tlspass pass com.example.app\n", os.Args[0])
 	}
-
+	fmt.Fprintf(os.Stderr, "Groid v%s - Golang Android Proxier\n\n", VERSION)
 	flag.Parse()
+	if len(os.Args) == 1 {
+		flag.Usage()
+		os.Exit(1)
+	}
 
 	// Check root
 	if os.Geteuid() != 0 {
@@ -143,6 +171,7 @@ func main() {
 		}
 		defer closeDatabase()
 		logf("Saving traffic to %s", config.SaveDB)
+		initHTTPPairer()
 
 		// Load TLS certificate if provided
 		if config.TLSCert != "" {
