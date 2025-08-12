@@ -9,12 +9,14 @@ import (
 	"strings"
 )
 
-func setupHTTPProxy(proxy net.Conn, firstData []byte, host string, port int) error {
-	// Check if it's HTTP request
-	data := string(firstData)
-
-	// Extract domain from HTTP request
+func setupHTTPProxy(proxy, client net.Conn, firstData []byte, host string, port int) error {
+	// Extract domain from HTTP request for blacklist checking
 	var targetHost string
+	data := string(firstData)
+	debugf("=== SETUP HTTP PROXY DEBUG ===")
+	debugf("Target: %s:%d", host, port)
+	debugf("FirstData length: %d", len(firstData))
+	//debugf("FirstData preview: %s", string(firstData[:min(200, len(firstData))]))
 
 	if strings.HasPrefix(data, "CONNECT ") {
 		// HTTPS CONNECT request - extract host from CONNECT line
@@ -58,35 +60,40 @@ func setupHTTPProxy(proxy net.Conn, firstData []byte, host string, port int) err
 		return fmt.Errorf("blocked by blacklist: %s", host)
 	}
 
-	// Continue with normal proxy setup
-	if strings.HasPrefix(data, "CONNECT ") {
-		// HTTPS CONNECT - forward as-is
-		proxy.Write(firstData)
-	} else if strings.Contains(data, " HTTP/") {
-		// HTTP request - convert to absolute URL
-		lines := strings.Split(data, "\r\n")
-		if len(lines) > 0 {
-			parts := strings.Fields(lines[0])
-			if len(parts) >= 3 {
-				// Keep original port, not proxy port!
-				scheme := "http"
-				if port == 443 {
-					scheme = "https"
-				}
-				absoluteURL := fmt.Sprintf("%s://%s:%d%s", scheme, host, port, parts[1])
-				lines[0] = fmt.Sprintf("%s %s %s", parts[0], absoluteURL, parts[2])
+	// ALWAYS use CONNECT method for HTTP proxy compatibility
+	connectReq := fmt.Sprintf("CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n",
+		host, port, host, port)
+	debugf("Proxy connection is to: %s", proxy.RemoteAddr())
+	debugf("Sending CONNECT for target: %s:%d", host, port)
 
-				proxy.Write([]byte(strings.Join(lines, "\r\n")))
-				return nil
-			}
-		}
-		// Fallback - send as-is
-		proxy.Write(firstData)
-	} else {
-		// Not HTTP - send as-is
-		proxy.Write(firstData)
+	_, err := proxy.Write([]byte(connectReq))
+	if err != nil {
+		return fmt.Errorf("failed to send CONNECT request: %v", err)
 	}
 
+	// Read CONNECT response from proxy
+	resp := make([]byte, 1024)
+	n, err := proxy.Read(resp)
+	if err != nil {
+		return fmt.Errorf("failed to read CONNECT response: %v", err)
+	}
+
+	// Check for successful CONNECT response (200 Connection established)
+	responseStr := string(resp[:n])
+	if !strings.Contains(responseStr, "200") {
+		debugf("HTTP proxy CONNECT failed: %s", strings.TrimSpace(responseStr))
+		return fmt.Errorf("proxy CONNECT failed: %s", strings.TrimSpace(responseStr))
+	}
+
+	debugf("HTTP proxy CONNECT successful, tunnel established")
+
+	// Now send the original client data through the established tunnel
+	_, err = proxy.Write(firstData)
+	if err != nil {
+		return fmt.Errorf("failed to send original data through tunnel: %v", err)
+	}
+
+	debugf("Original client data sent through HTTP proxy tunnel")
 	return nil
 }
 

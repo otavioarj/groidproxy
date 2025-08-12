@@ -109,7 +109,7 @@ func main() {
 	flag.BoolVar(&list, "list", false, "List current rules")
 	flag.StringVar(&remove, "remove", "", "Remove rules for package")
 	flag.StringVar(&config.Blacklist, "blacklist", "", "Comma-separated list of blocked hosts/IPs (use .domain.com for wildcards)\n[!] Doesn't work on raw redirect")
-	flag.StringVar(&config.SaveDB, "save", "/data/local/tmp/Groid.db", "Save traffic to a SQLite database\n[!] Doesn't work on raw redirect\n[*] Can work without external proxy, only saving app(s) traffic locally.")
+	flag.StringVar(&config.SaveDB, "save", "", "Save traffic to a SQLite database, i.e., /data/local/tmp/Groid.db\n[!] Doesn't work on raw redirect\n[*] Can work without external proxy, only saving app(s) traffic locally.")
 	flag.StringVar(&config.TLSCert, "tlscert", "", "PKCS12 certificate for TLS interception AND CA per-host!")
 	flag.StringVar(&config.TLSPass, "tlspass", "", "Password for PKCS12 certificate")
 
@@ -132,7 +132,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  %s -p http://192.168.1.100:1080 -save /data/local/tmp/Example.db -tlscert burp.pk12 -tlspass pass com.example.app\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -save /data/local/tmp/Example.db -tlscert burp.pk12 -tlspass pass com.example.app\n", os.Args[0])
 	}
-	fmt.Fprintf(os.Stderr, "Groid v%s - Golang Android Proxier\n\n", VERSION)
+	fmt.Fprintf(os.Stderr, "<=[Groid v%s - Golang Android Proxier]=>\n", VERSION)
 	flag.Parse()
 	if len(os.Args) == 1 {
 		flag.Usage()

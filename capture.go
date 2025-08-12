@@ -16,6 +16,7 @@ func captureHTTP(client, server net.Conn, firstReq []byte, host string, port int
 	}
 
 	// Parse first request
+	// Parse first request (already sent by setupHTTPProxy, so don't re-send)
 	if lines := strings.Split(string(firstReq), "\r\n"); len(lines) > 0 {
 		parts := strings.Fields(lines[0])
 		if len(parts) >= 2 {
@@ -24,12 +25,12 @@ func captureHTTP(client, server net.Conn, firstReq []byte, host string, port int
 		}
 	}
 
-	// Accumulate request
+	// Accumulate request - NOTE: firstReq already sent, so start with empty buffer
 	var requestBuf bytes.Buffer
-	requestBuf.Write(firstReq)
+	//DO NOT write firstReq to requestBuf since it was already sent, no requestBuf.Write(firstReq) here
 
 	// Forward and capture request
-	done := make(chan bool)
+	done := make(chan bool, 2)
 	go func() {
 		buf := make([]byte, 4096)
 		for requestBuf.Len() < MAX_CAPTURE_SIZE {

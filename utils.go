@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"strconv"
@@ -40,60 +39,25 @@ func getPackageUID(pkg string) int {
 	return 0
 }
 
-func relayWithStats(client, proxy net.Conn, target string) {
-	done := make(chan bool, 2)
-	var clientToProxy, proxyToClient int64
+// isConnectionClosed checks if error indicates a real connection close
+func isConnectionClosed(err error) bool {
+	if err == nil {
+		return false
+	}
 
-	// Client to Proxy
-	go func() {
-		buf := make([]byte, 4*1024)
-		for {
-			n, err := client.Read(buf)
-			if err != nil {
-				break
-			}
-
-			written, err := proxy.Write(buf[:n])
-			if err != nil {
-				break
-			}
-
-			clientToProxy += int64(written)
-			printStats(target, clientToProxy, proxyToClient)
+	errStr := strings.ToLower(err.Error())
+	connectionClosedPatterns := []string{
+		"connection reset by peer",
+		"broken pipe",
+		"use of closed network connection",
+	}
+	for _, pattern := range connectionClosedPatterns {
+		if strings.Contains(errStr, pattern) {
+			return true
 		}
-		done <- true
-	}()
+	}
 
-	// Proxy to Client
-	go func() {
-		buf := make([]byte, 4*1024)
-		for {
-			n, err := proxy.Read(buf)
-			if err != nil {
-				break
-			}
-
-			written, err := client.Write(buf[:n])
-			if err != nil {
-				break
-			}
-
-			proxyToClient += int64(written)
-			go printStats(target, clientToProxy, proxyToClient)
-		}
-		done <- true
-	}()
-
-	// Wait for both directions to complete
-	<-done
-	<-done
-
-	// Print final stats with newline
-	fmt.Printf("\r[%s] %s - TX: %s, RX: %s [CLOSED]\n",
-		time.Now().Format("15:04:05"),
-		target,
-		formatBytes(clientToProxy),
-		formatBytes(proxyToClient))
+	return false
 }
 
 func printStats(target string, tx, rx int64) {

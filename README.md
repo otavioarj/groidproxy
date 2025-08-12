@@ -45,6 +45,13 @@
 ./groidproxy -p http://192.168.1.100:1080 -save /data/local/tmp/Example.db -tlscert burp.pk12 -tlspass pass com.example.app
 ./groidproxy -save /data/local/tmp/Example.db -tlscert burp.pk12 -tlspass pass com.example.app
 ```
+# 🐛 Known bugs
+
+## Burp HTTP State machine
+
+Burp isn't following HTTP/1.1 pipe-line/tunnel reuse correclty, it send an EOF (end-of-file) after each HTTP/1.1 response. One of the following configs must be set to use Groid mode HTTP:
+- Proxy Settings -> Proxy listeners -> Request handling -> Support invisible proxying: **ON**
+- Proxy Settings -> Miscellaneous: Use keep-alvie for HTTP/1.1 **OFF** OR Set response header "Connection: close" **ON** 
 
 
 # 🧱 Groid Proxy - Architecture
