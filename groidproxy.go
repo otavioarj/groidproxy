@@ -17,7 +17,7 @@ import (
 
 const (
 	CHAIN_NAME      = "GROID_OUT"
-	VERSION         = "1.2.0"
+	VERSION         = "1.2.2"
 	SO_ORIGINAL_DST = 80
 )
 
