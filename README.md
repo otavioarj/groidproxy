@@ -52,7 +52,18 @@
 Burp isn't following HTTP/1.1 pipe-line/tunnel reuse correclty, it sends an EOF (end-of-file) after each HTTP/1.1 response. **One** of the following configs must be set to use Groid mode HTTP:
 - Proxy Settings -> Proxy listeners -> Request handling -> Support invisible proxying: **ON**
 - Proxy Settings -> Miscellaneous: Use keep-alvie for HTTP/1.1 **OFF** 
--                                  Set response header "Connection: close" **ON** 
+- Proxy Settings -> Miscellaneous: Set response header "Connection: close" **ON** 
+
+# 🔨 Build
+
+First run will sync mod dependencies and build for AARCH64: 
+> build.sh 
+
+Build and push ELF to Android /data/local/tmp using ADB:
+> build push
+
+If need to resync mod dependencies:
+> build update
 
 
 # 🧱 Groid Proxy - Architecture
