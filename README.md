@@ -49,7 +49,7 @@
 
 ## Burp HTTP State machine
 
-Burp isn't following HTTP/1.1 pipe-line/tunnel reuse correclty, it sends an EOF (end-of-file) after each HTTP/1.1 response. **One** of the following configs must be set to use Groid mode HTTP:
+Burp isn't following HTTP/1.1 pipe-line/tunnel reuse correclty, it sends an EOF (end-of-file) after each HTTP/1.1 response. **One** of the following configs must be set to use Groid HTTP mode (-p http://):
 - Proxy Settings -> Proxy listeners -> Request handling -> Support invisible proxying: **ON**
 - Proxy Settings -> Miscellaneous: Use keep-alvie for HTTP/1.1 **OFF** 
 - Proxy Settings -> Miscellaneous: Set response header "Connection: close" **ON** 
