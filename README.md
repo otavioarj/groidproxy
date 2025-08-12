@@ -57,18 +57,24 @@ Burp isn't following HTTP/1.1 pipe-line/tunnel reuse correclty, it sends an EOF 
 # 🔨 Build
 
 First run will sync mod dependencies and build for AARCH64: 
->/build.sh 
-> Building...
-> Done :)
+```
+ /build.sh    
+Building...  
+Done :)  
+```
 
 Build and push ELF to Android /data/local/tmp using ADB:
->/build.sh push
-> groidproxy: 1 file pushed, 0 skipped. 255.0 MB/s (8323224 bytes in 0.031s)
-> Pushed to /data/local/tmp
+```
+ /build.sh push  
+groidproxy: 1 file pushed, 0 skipped. 255.0 MB/s (8323224 bytes in 0.031s)   
+Pushed to /data/local/tmp  
+```
 
 If need to resync mod dependencies:
-> /build.sh update
-
+```
+ /build.sh update
+ [go mod tidy output :P]
+```
 
 # 🧱 Groid Proxy - Architecture
 
