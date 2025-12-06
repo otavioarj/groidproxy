@@ -17,7 +17,7 @@ import (
 
 const (
 	CHAIN_NAME      = "GROID_OUT"
-	VERSION         = "1.2.2"
+	VERSION         = "1.2.5"
 	SO_ORIGINAL_DST = 80
 )
 
@@ -100,7 +100,7 @@ func main() {
 	flag.StringVar(&config.ProxyAddr, "p", "", "Proxy address (host:port or http://host:port or socks5://host:port)")
 	flag.IntVar(&config.LocalPort, "local-port", 8123, "Local port for transparent proxy")
 	flag.BoolVar(&config.Daemon, "d", false, "Run as daemon")
-	flag.BoolVar(&config.UseGlobal, "global", false, "Redirect all traffic")
+	flag.BoolVar(&config.UseGlobal, "global", false, "Redirect all user traffic")
 	flag.BoolVar(&config.DNSRedirect, "dns", false, "Also redirect DNS (port 53)")
 	flag.BoolVar(&config.Verbose, "v", false, "Verbose output")
 	flag.BoolVar(&config.Stats, "stats", false, "Show I/O statistics")

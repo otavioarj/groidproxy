@@ -104,7 +104,6 @@ func isChunkedMessageComplete(body []byte) bool {
 			finalCRLF := bytes.Index(remainingData, []byte("\r\n"))
 			return finalCRLF != -1 // Missing final CRLF (false) or Chunked message complete (true)
 		}
-
 		// Move past chunk data and trailing CRLF
 		pos += chunkSize + 2
 	}
