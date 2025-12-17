@@ -9,7 +9,7 @@ if [ "$1" = "update" ] || [ ! -f "$TIDY_FILE" ]; then
 fi
 
 echo "Building..."
-GOOS=linux GOARCH=arm64 CGO_ENABLED=0  go build -ldflags="-s -w" 
+GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" 
 echo "Done :)"
 
 if [ "$1" = "push" ]; then

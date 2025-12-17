@@ -5,8 +5,7 @@ import (
 	"crypto/x509"
 	"database/sql"
 	"flag"
-	"fmt"
-	"net"
+	"fmt"	
 	"os"
 	"os/exec"
 	"os/signal"
@@ -17,7 +16,7 @@ import (
 
 const (
 	CHAIN_NAME      = "GROID_OUT"
-	VERSION         = "1.2.5"
+	VERSION         = "1.3.0"
 	SO_ORIGINAL_DST = 80
 )
 
@@ -40,12 +39,6 @@ type HTTPPairer struct {
 
 // Global HTTP pairer instance
 var httpPairer *HTTPPairer
-
-// debugConn wraps net.Conn to log all I/O operations
-type debugConn struct {
-	net.Conn
-	name string
-}
 
 type CaptureData struct {
 	Timestamp int64
@@ -196,10 +189,10 @@ func main() {
 	// Enable IPv4 forwarding
 	exec.Command("sysctl", "-w", "net.ipv4.ip_forward=1").Run()
 
-	// Parse blacklist
+	// Parse blacklist (not available in raw redirect mode)
 	if config.Blacklist != "" {
-		if config.ProxyType != "redirect" {
-			fatal("Blacklist doesnt work on rediect mode!")
+		if config.ProxyType == "redirect" {
+			fatal("Blacklist not available in redirect mode")
 		}
 		blacklistMap = make(map[string]bool)
 		for _, host := range strings.Split(config.Blacklist, ",") {

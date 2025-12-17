@@ -1,4 +1,4 @@
-# Groid v1.2.2 – Golang Android Proxier
+# Groid v1.3.0 – Golang Android Proxier
 
 ## 📦 Usage
 
@@ -10,7 +10,7 @@
 
 | Flag               | Description                                                                                                      |
 |--------------------|------------------------------------------------------------------------------------------------------------------|
-| `-blacklist string`| Comma-separated list of blocked hosts/IPs (`.domain.com` for wildcards)<br>❗Doesn't work on raw redirect         |
+| `-blacklist string`| Comma-separated list of blocked hosts/IPs (`.domain.com` for wildcards)<br>❗Doesn't work on raw redirect        |
 | `-d`               | Run as daemon                                                                                                    |
 | `-dns`             | Also redirect DNS (port 53)                                                                                      |
 | `-flush`           | Remove all GROID rules                                                                                           |
@@ -23,7 +23,7 @@
 | `-stats`           | Show I/O statistics                                                                                              |
 | `-timeout int`     | Connection timeout in seconds (default: `10`)                                                                    |
 | `-tlscert string`  | PKCS12 certificate for TLS interception AND CA per-host                                                          |
-| `-tlspass string`  | Password for PKCS12 certificate                                                                                   |
+| `-tlspass string`  | Password for PKCS12 certificate                                                                                  |
 | `-v`               | Verbose output                                                                                                   |
 
 ## 🧰 Proxy Modes
@@ -49,7 +49,8 @@
 
 ## Burp HTTP State machine
 
-Burp isn't following HTTP/1.1 pipe-line/tunnel reuse correclty, it sends an EOF (end-of-file) after each HTTP/1.1 response. **One** of the following configs must be set to use Groid HTTP mode (-p http://):
+Until Groid v1.2, there're bugs related to how Burp sends an EOF (end-of-file) after each HTTP/1.1 response. This was **Fixed** by version 1.3.
+If you encounter any issues while using Groid HTTP mode (-p http://), **OPEN** a ticket. In **v1.2** one of the following configs must be set to use HTTP mode (-p http://):
 - Proxy Settings -> Proxy listeners -> Request handling -> Support invisible proxying: **ON** (Best)
 - Proxy Settings -> Miscellaneous: Use keep-alvie for HTTP/1.1 **OFF** (Worst)
 - Proxy Settings -> Miscellaneous: Set response header "Connection: close" **ON** 

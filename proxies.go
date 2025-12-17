@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -9,98 +10,97 @@ import (
 	"strings"
 )
 
-func setupHTTPProxy(proxy, client net.Conn, firstData []byte, host string, port int) error {
-	// Extract domain from HTTP request for blacklist checking
-	var targetHost string
-	data := string(firstData)
-	debugf("=== SETUP HTTP PROXY DEBUG ===")
-	debugf("Target: %s:%d", host, port)
-	debugf("FirstData length: %d", len(firstData))
-	//debugf("FirstData preview: %s", string(firstData[:min(200, len(firstData))]))
-
-	if strings.HasPrefix(data, "CONNECT ") {
-		// HTTPS CONNECT request - extract host from CONNECT line
-		lines := strings.Split(data, "\r\n")
-		if len(lines) > 0 {
-			parts := strings.Fields(lines[0])
-			if len(parts) >= 2 {
-				// CONNECT host:port HTTP/1.1
-				hostPort := parts[1]
-				if idx := strings.LastIndex(hostPort, ":"); idx != -1 {
-					targetHost = hostPort[:idx]
-				} else {
-					targetHost = hostPort
-				}
-			}
-		}
-	} else if strings.Contains(data, " HTTP/") {
-		// Regular HTTP request - extract from Host header
-		lines := strings.Split(data, "\r\n")
-		for _, line := range lines {
-			if strings.HasPrefix(strings.ToLower(line), "host:") {
-				targetHost = strings.TrimSpace(strings.TrimPrefix(strings.ToLower(line), "host:"))
-				// Remove port if present
-				if idx := strings.LastIndex(targetHost, ":"); idx != -1 {
-					targetHost = targetHost[:idx]
-				}
-				break
-			}
-		}
-	}
-
-	// Check blacklist with extracted domain
-	if targetHost != "" && isBlacklisted(targetHost) {
-		debugf("Blocked HTTP connection to %s", targetHost)
-		return fmt.Errorf("blocked by blacklist: %s", targetHost)
-	}
-
-	// If no domain found, check IP
-	if targetHost == "" && isBlacklisted(host) {
-		debugf("Blocked HTTP connection to IP %s", host)
-		return fmt.Errorf("blocked by blacklist: %s", host)
-	}
-
-	// ALWAYS use CONNECT method for HTTP proxy compatibility
+// setupHTTPTunnel establishes CONNECT tunnel through HTTP proxy
+// Used for HTTPS/TLS connections needing end-to-end encryption
+func setupHTTPTunnel(proxy net.Conn, host string, port int) error {
 	connectReq := fmt.Sprintf("CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n",
 		host, port, host, port)
-	debugf("Proxy connection is to: %s", proxy.RemoteAddr())
-	debugf("Sending CONNECT for target: %s:%d", host, port)
 
-	_, err := proxy.Write([]byte(connectReq))
-	if err != nil {
-		return fmt.Errorf("failed to send CONNECT request: %v", err)
+	if _, err := proxy.Write([]byte(connectReq)); err != nil {
+		return fmt.Errorf("CONNECT write failed: %v", err)
 	}
 
-	// Read CONNECT response from proxy
-	resp := make([]byte, 1024)
+	resp := bufPool1K.Get().([]byte)
+	defer bufPool1K.Put(resp)
+
 	n, err := proxy.Read(resp)
 	if err != nil {
-		return fmt.Errorf("failed to read CONNECT response: %v", err)
+		return fmt.Errorf("CONNECT response read failed: %v", err)
 	}
 
-	// Check for successful CONNECT response (200 Connection established)
-	responseStr := string(resp[:n])
-	if !strings.Contains(responseStr, "200") {
-		debugf("HTTP proxy CONNECT failed: %s", strings.TrimSpace(responseStr))
-		return fmt.Errorf("proxy CONNECT failed: %s", strings.TrimSpace(responseStr))
+	if !bytes.Contains(resp[:n], []byte("200")) {
+		return fmt.Errorf("CONNECT rejected: %s", strings.TrimSpace(string(resp[:n])))
 	}
 
-	debugf("HTTP proxy CONNECT successful, tunnel established")
-
-	// Now send the original client data through the established tunnel
-	_, err = proxy.Write(firstData)
-	if err != nil {
-		return fmt.Errorf("failed to send original data through tunnel: %v", err)
-	}
-
-	debugf("Original client data sent through HTTP proxy tunnel")
+	debugf("HTTP tunnel established to %s:%d", host, port)
 	return nil
 }
 
-// Doesn't support IPV6 hehe :(
+// setupHTTPDirect forwards plain HTTP request through proxy
+// Rewrites relative URL to absolute URL per RFC 7230
+// BUG 6 FIX: Removed duplicate blacklist check (now only in handleHTTP)
+func setupHTTPDirect(proxy net.Conn, firstData []byte, host string, port int) error {
+	// Rewrite request with absolute URL
+	rewritten := rewriteHTTPAbsolute(firstData, host, port)
+
+	if _, err := proxy.Write(rewritten); err != nil {
+		return fmt.Errorf("HTTP request write failed: %v", err)
+	}
+
+	debugf("HTTP request forwarded to proxy for %s:%d", host, port)
+	return nil
+}
+
+// rewriteHTTPAbsolute converts relative URL to absolute URL for proxy
+// "GET /path HTTP/1.1" -> "GET http://host:port/path HTTP/1.1"
+func rewriteHTTPAbsolute(data []byte, host string, port int) []byte {
+	lineEnd := bytes.Index(data, []byte("\r\n"))
+	if lineEnd == -1 {
+		return data
+	}
+
+	parts := bytes.SplitN(data[:lineEnd], []byte(" "), 3)
+	if len(parts) < 3 {
+		return data
+	}
+
+	method := parts[0]
+	path := parts[1]
+	version := parts[2]
+
+	// Skip if already absolute URL
+	lowerPath := bytes.ToLower(path)
+	if bytes.HasPrefix(lowerPath, []byte("http://")) ||
+		bytes.HasPrefix(lowerPath, []byte("https://")) {
+		return data
+	}
+
+	// Build absolute URL
+	var absoluteURL string
+	if port == 80 {
+		absoluteURL = fmt.Sprintf("http://%s%s", host, path)
+	} else {
+		absoluteURL = fmt.Sprintf("http://%s:%d%s", host, port, path)
+	}
+
+	// Reconstruct request
+	newLine := fmt.Sprintf("%s %s %s\r\n", method, absoluteURL, version)
+	return append([]byte(newLine), data[lineEnd+2:]...)
+}
+
+// setupSOCKS5Proxy establishes SOCKS5 connection to target
+// BUG 5 FIX: Check blacklist BEFORE handshake
+// BUG 7 FIX: Removed redundant blacklist check
 func setupSOCKS5Proxy(proxy net.Conn, host string, port int) error {
-	// SOCKS5 handshake
-	proxy.Write([]byte{0x05, 0x01, 0x00}) // Version 5, 1 method, no auth
+	// BUG 5 FIX: Check blacklist first, before any network I/O
+	if isBlacklisted(host) {
+		return fmt.Errorf("blocked: %s", host)
+	}
+
+	// Handshake: version 5, 1 method, no auth
+	if _, err := proxy.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+		return err
+	}
 
 	resp := make([]byte, 2)
 	if _, err := io.ReadFull(proxy, resp); err != nil {
@@ -111,60 +111,32 @@ func setupSOCKS5Proxy(proxy net.Conn, host string, port int) error {
 		return fmt.Errorf("SOCKS5 handshake failed")
 	}
 
-	// Check if host is IP or domain
-	ip := net.ParseIP(host)
-	targetDomain := ""
-
-	// If it's not an IP, it's a domain
-	if ip == nil {
-		targetDomain = host
-	}
-
-	// Check blacklist
-	if targetDomain != "" && isBlacklisted(targetDomain) {
-		debugf("Blocked SOCKS5 connection to domain %s", targetDomain)
-		// Send SOCKS5 error response (connection refused)
-		errorResp := []byte{0x05, 0x05, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
-		proxy.Write(errorResp)
-		return fmt.Errorf("blocked by blacklist: %s", targetDomain)
-	}
-
-	// Also check IP blacklist
-	if isBlacklisted(host) {
-		debugf("Blocked SOCKS5 connection to %s", host)
-		// Send SOCKS5 error response (connection refused)
-		errorResp := []byte{0x05, 0x05, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
-		proxy.Write(errorResp)
-		return fmt.Errorf("blocked by blacklist: %s", host)
-	}
-
 	// Build connect request
-	req := []byte{0x05, 0x01, 0x00} // Version 5, connect, reserved
+	req := []byte{0x05, 0x01, 0x00} // version, connect, reserved
 
-	// Add destination
+	ip := net.ParseIP(host)
 	if ip != nil && ip.To4() != nil {
-		req = append(req, 0x01) // IPv4
+		req = append(req, 0x01)       // IPv4
 		req = append(req, ip.To4()...)
 	} else if ip != nil {
-		req = append(req, 0x04) // IPv6
+		req = append(req, 0x04)        // IPv6
 		req = append(req, ip.To16()...)
 	} else {
-		req = append(req, 0x03) // Domain
+		req = append(req, 0x03)        // Domain
 		req = append(req, byte(len(host)))
 		req = append(req, []byte(host)...)
 	}
 
-	// Add port
+	// Append port (big endian)
 	portBytes := make([]byte, 2)
 	binary.BigEndian.PutUint16(portBytes, uint16(port))
 	req = append(req, portBytes...)
 
-	// Send connect
 	if _, err := proxy.Write(req); err != nil {
 		return err
 	}
 
-	// Read response
+	// Read response header
 	resp = make([]byte, 4)
 	if _, err := io.ReadFull(proxy, resp); err != nil {
 		return err
@@ -174,21 +146,23 @@ func setupSOCKS5Proxy(proxy net.Conn, host string, port int) error {
 		return fmt.Errorf("SOCKS5 connect failed: %d", resp[1])
 	}
 
-	// Skip bind address
+	// Skip bind address based on type
 	switch resp[3] {
 	case 0x01: // IPv4
 		io.ReadFull(proxy, make([]byte, 4+2))
 	case 0x03: // Domain
-		var len byte
-		binary.Read(proxy, binary.BigEndian, &len)
-		io.ReadFull(proxy, make([]byte, int(len)+2))
+		var length byte
+		binary.Read(proxy, binary.BigEndian, &length)
+		io.ReadFull(proxy, make([]byte, int(length)+2))
 	case 0x04: // IPv6
 		io.ReadFull(proxy, make([]byte, 16+2))
 	}
 
+	debugf("SOCKS5 tunnel established to %s:%d", host, port)
 	return nil
 }
 
+// runProxy starts the local transparent proxy listener
 func runProxy() {
 	listener, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", config.LocalPort))
 	if err != nil {
@@ -201,11 +175,11 @@ func runProxy() {
 		if err != nil {
 			continue
 		}
-
 		go handleClient(client)
 	}
 }
 
+// parseProxyAddr parses proxy address and sets config type
 func parseProxyAddr() {
 	if config.ProxyAddr == "" && config.SaveDB != "" {
 		config.ProxyType = "capture"
@@ -214,22 +188,22 @@ func parseProxyAddr() {
 	if config.ProxyAddr == "" {
 		return
 	}
+
 	addr := config.ProxyAddr
 
-	// Determine proxy type
-	if strings.HasPrefix(addr, "http://") {
+	switch {
+	case strings.HasPrefix(addr, "http://"):
 		config.ProxyType = "http"
 		addr = strings.TrimPrefix(addr, "http://")
-	} else if strings.HasPrefix(addr, "socks5://") {
+	case strings.HasPrefix(addr, "socks5://"):
 		config.ProxyType = "socks5"
 		addr = strings.TrimPrefix(addr, "socks5://")
-	} else if !strings.Contains(addr, "://") {
+	case !strings.Contains(addr, "://"):
 		config.ProxyType = "redirect"
-	} else {
+	default:
 		fatal("Unknown proxy type")
 	}
 
-	// Parse host:port
 	parts := strings.Split(addr, ":")
 	if len(parts) != 2 {
 		fatal("Invalid proxy address format")

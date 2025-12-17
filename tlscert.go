@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -155,19 +154,12 @@ func setupServerTLSConnection(hostName, hostIP string, port int) (*tls.Conn, err
 		return nil, fmt.Errorf("proxy connection failed: %v", err)
 	}
 
-	// Setup proxy tunnel
+	// Setup proxy tunnel (reuses shared tunnel setup logic)
 	switch config.ProxyType {
 	case "http":
-		connectReq := fmt.Sprintf("CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n",
-			hostName, port, hostName, port)
-		serverConn.Write([]byte(connectReq))
-
-		// Read proxy response
-		resp := make([]byte, 1024)
-		n, err := serverConn.Read(resp)
-		if err != nil || !bytes.Contains(resp[:n], []byte("200")) {
+		if err := setupHTTPTunnel(serverConn, hostName, port); err != nil {
 			serverConn.Close()
-			return nil, fmt.Errorf("proxy CONNECT failed: %s", string(resp[:n]))
+			return nil, fmt.Errorf("HTTP tunnel failed: %v", err)
 		}
 
 	case "socks5":

@@ -5,234 +5,285 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
 )
 
-func (d *debugConn) Read(b []byte) (n int, err error) {
-	n, err = d.Conn.Read(b)
-	if n > 0 {
-		debugf("%s READ: %d bytes [%02x %02x %02x %02x...]", d.name, n,
-			safeByteAt(b, 0), safeByteAt(b, 1), safeByteAt(b, 2), safeByteAt(b, 3))
-	} else {
-		debugf("%s READ: %d bytes, err: %v", d.name, n, err)
+// ConnType represents detected connection protocol
+type ConnType int
+
+const (
+	ConnHTTP    ConnType = iota // Plain HTTP (GET, POST, etc.)
+	ConnCONNECT                 // HTTP CONNECT tunnel request
+	ConnTLS                     // Direct TLS handshake
+	ConnUnknown                 // Unknown/binary protocol
+)
+
+// Pre-allocated method prefixes for efficient detection (OPT 10)
+var httpMethods = [][]byte{
+	[]byte("GET "),
+	[]byte("POST "),
+	[]byte("PUT "),
+	[]byte("DELETE "),
+	[]byte("HEAD "),
+	[]byte("OPTIONS "),
+	[]byte("PATCH "),
+	[]byte("TRACE "),
+}
+
+// Buffer pools to reduce allocations (OPT 11)
+var (
+	bufPool4K = sync.Pool{New: func() interface{} { return make([]byte, 4*1024) }}
+	bufPool1K = sync.Pool{New: func() interface{} { return make([]byte, 1024) }}
+)
+
+func (c ConnType) String() string {
+	return [...]string{"HTTP", "CONNECT", "TLS", "Unknown"}[c]
+}
+
+// detectConnType analyzes first bytes to determine connection type
+func detectConnType(data []byte) ConnType {
+	if len(data) == 0 {
+		return ConnUnknown
 	}
-	return
-}
 
-type prefixedConn struct {
-	net.Conn
-	prefixData []byte
-	prefixRead bool
-}
-
-// Need this as the client-tls conn we read it before-hand to grab if its a COONECT ou ClientHello
-func (p *prefixedConn) Read(b []byte) (n int, err error) {
-	if !p.prefixRead {
-		// First read: returns data already read
-		p.prefixRead = true
-		n = copy(b, p.prefixData)
-		return n, nil
+	if isTLSHandshake(data) {
+		return ConnTLS
 	}
-	// Reads normally
-	return p.Conn.Read(b)
-}
 
-func (d *debugConn) Write(b []byte) (n int, err error) {
-	debugf("%s WRITE: attempting %d bytes [%02x %02x %02x %02x...]", d.name, len(b),
-		safeByteAt(b, 0), safeByteAt(b, 1), safeByteAt(b, 2), safeByteAt(b, 3))
-
-	n, err = d.Conn.Write(b)
-
-	if err != nil {
-		debugf("%s WRITE: %d bytes written, err: %v", d.name, n, err)
-	} else {
-		debugf("%s WRITE: %d bytes written successfully", d.name, n)
+	if bytes.HasPrefix(data, []byte("CONNECT ")) {
+		return ConnCONNECT
 	}
-	return
-}
 
-func safeByteAt(b []byte, index int) byte {
-	if index < len(b) {
-		return b[index]
+	// OPT 10: use pre-allocated slices
+	for _, m := range httpMethods {
+		if bytes.HasPrefix(data, m) {
+			return ConnHTTP
+		}
 	}
-	return 0x00
+
+	return ConnUnknown
 }
 
+// handleClient handles incoming transparent proxy connections
+// Unified handler - integrates previous handleClientWithCapture
 func handleClient(client net.Conn) {
 	defer client.Close()
 
-	// Get original destination
 	host, port, err := getOriginalDst(client)
 	if err != nil {
 		debugf("Failed to get original destination: %v", err)
 		return
 	}
-
 	debugf("New connection to %s:%d", host, port)
 
-	// For capture/save mode
-	if config.SaveDB != "" {
-		handleClientWithCapture(client, host, port)
-		return
-	}
-
-	// Read first data from client (only once)
-	buf := make([]byte, 4096)
+	buf := bufPool4K.Get().([]byte)
 	n, err := client.Read(buf)
 	if err != nil {
+		bufPool4K.Put(buf)
 		return
 	}
-	firstData := buf[:n]
+	firstData := make([]byte, n)
+	copy(firstData, buf[:n])
+	bufPool4K.Put(buf)
 
-	// Main reconnection loop
+	connType := detectConnType(firstData)
+	debugf("Detected connection type: %s", connType)
+
+	switch connType {
+	case ConnTLS, ConnCONNECT:
+		handleHTTPS(client, firstData, host, port, connType)
+	case ConnHTTP:
+		handleHTTP(client, firstData, host, port)
+	default:
+		handleTunnel(client, firstData, host, port, true)
+	}
+}
+
+// handleHTTPS handles TLS and CONNECT requests
+// Routes to interception or tunneling based on config
+func handleHTTPS(client net.Conn, firstData []byte, host string, port int, connType ConnType) {
+	// TLS interception if capture mode with certificate
+	if config.SaveDB != "" && config.TLSCert != "" {
+		handleTLSIntercept(client, host, port, firstData)
+		return
+	}
+
+	// BUG 1 FIX: For CONNECT requests without interception, respond 200 first
+	if connType == ConnCONNECT {
+		if _, err := client.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n")); err != nil {
+			debugf("Failed to send CONNECT response: %v", err)
+			return
+		}
+		// Read actual TLS ClientHello from client
+		buf := bufPool4K.Get().([]byte)
+		n, err := client.Read(buf)
+		if err != nil {
+			bufPool4K.Put(buf)
+			debugf("Failed to read post-CONNECT data: %v", err)
+			return
+		}
+		firstData = make([]byte, n)
+		copy(firstData, buf[:n])
+		bufPool4K.Put(buf)
+	}
+
+	handleTunnel(client, firstData, host, port, true)
+}
+
+// handleHTTP handles plain HTTP requests
+// Supports capture mode and proxy forwarding
+func handleHTTP(client net.Conn, firstData []byte, host string, port int) {
+	// BUG 6 FIX: Single blacklist check here, removed from setupHTTPDirect
+	targetHost := extractHTTPHost(firstData, host)
+	if isBlacklisted(targetHost) || isBlacklisted(host) {
+		debugf("Blocked connection to %s", targetHost)
+		return
+	}
+
+	if config.ProxyType == "capture" {
+		handleDirectHTTP(client, firstData, host, port)
+		return
+	}
+
+	handleTunnel(client, firstData, host, port, false)
+}
+
+// handleDirectHTTP connects directly to target for HTTP capture
+func handleDirectHTTP(client net.Conn, firstData []byte, host string, port int) {
+	server, err := net.DialTimeout("tcp",
+		fmt.Sprintf("%s:%d", host, port),
+		time.Duration(config.Timeout)*time.Second)
+	if err != nil {
+		debugf("Direct connection failed: %v", err)
+		return
+	}
+	defer server.Close()
+
+	server.Write(firstData)
+
+	if config.SaveDB != "" {
+		captureHTTP(client, server, firstData, host, port)
+	} else {
+		relayBidirectional(client, server, fmt.Sprintf("%s:%d", host, port), config.Stats)
+	}
+}
+
+// handleTunnel establishes tunnel through upstream proxy
+// isTunnel: true for CONNECT-based tunnel, false for plain HTTP
+func handleTunnel(client net.Conn, firstData []byte, host string, port int, isTunnel bool) {
 	for {
-		debugf("Establishing proxy connection to %s:%d", config.ProxyHost, config.ProxyPort)
-
-		// Create proxy connection
 		proxy, err := net.DialTimeout("tcp",
 			fmt.Sprintf("%s:%d", config.ProxyHost, config.ProxyPort),
 			time.Duration(config.Timeout)*time.Second)
 		if err != nil {
-			debugf("Failed to connect to proxy: %v", err)
+			debugf("Proxy connection failed: %v", err)
 			return
 		}
 
-		// Setup proxy connection based on type
-		err = setupProxyConnection(proxy, client, firstData, host, port)
+		err = setupUpstreamConn(proxy, firstData, host, port, isTunnel)
 		if err != nil {
-			debugf("Proxy setup failed: %v", err)
+			debugf("Upstream setup failed: %v", err)
 			proxy.Close()
 			return
 		}
 
-		// Start relay - returns when proxy connection dies
-		proxyDied := relayBidirectional(client, proxy, fmt.Sprintf("%s:%d", host, port), config.Stats)
+		if config.SaveDB != "" && !isTunnel {
+			captureHTTP(client, proxy, firstData, host, port)
+			proxy.Close()
+			return
+		}
 
+		proxyDied := relayBidirectional(client, proxy, fmt.Sprintf("%s:%d", host, port), config.Stats)
 		proxy.Close()
 
-		if !proxyDied {
-			// Client closed, normal termination
-			debugf("Client connection closed - ending relay")
+		if !proxyDied || !isClientAlive(client) {
 			break
 		}
 
-		// Proxy died but client still alive - check if client has more data
-		if !isClientAlive(client) {
-			debugf("Client connection also closed after proxy death")
-			break
-		}
-
-		debugf("Proxy died but client still alive - attempting reconnection...")
-
-		// For reconnection, firstData is nil (already sent)
+		debugf("Proxy died, client alive - reconnecting...")
 		firstData = nil
 	}
 }
 
-// setupProxyConnection handles proxy setup for both HTTP and SOCKS5
-func setupProxyConnection(proxy, client net.Conn, firstData []byte, host string, port int) error {
+// setupUpstreamConn configures upstream proxy connection
+// OPT 9: Inlined setupHTTPProxy logic
+func setupUpstreamConn(proxy net.Conn, firstData []byte, host string, port int, isTunnel bool) error {
 	switch config.ProxyType {
 	case "http":
-		return setupHTTPProxy(proxy, client, firstData, host, port)
+		if isTunnel {
+			if err := setupHTTPTunnel(proxy, host, port); err != nil {
+				return err
+			}
+		} else {
+			if err := setupHTTPDirect(proxy, firstData, host, port); err != nil {
+				return err
+			}
+		}
+		// Send firstData through tunnel after CONNECT established
+		if isTunnel && firstData != nil {
+			_, err := proxy.Write(firstData)
+			return err
+		}
+		return nil
+
 	case "socks5":
 		if err := setupSOCKS5Proxy(proxy, host, port); err != nil {
 			return err
 		}
-		// Send first data if we have it
 		if firstData != nil {
 			_, err := proxy.Write(firstData)
 			return err
 		}
 		return nil
+
 	default:
 		return fmt.Errorf("unsupported proxy type: %s", config.ProxyType)
 	}
 }
 
-func isClientAlive(client net.Conn) bool {
-	// Set very short read timeout to test connection
-	client.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
-	buf := make([]byte, 1)
-	_, err := client.Read(buf)
-	client.SetReadDeadline(time.Time{}) // Clear deadline
-
-	if err == nil {
-		// Data available - client is alive and has more data
-		return true
+// extractHTTPHost extracts hostname from HTTP Host header
+// OPT 12: Zero-allocation version using bytes operations
+func extractHTTPHost(data []byte, fallback string) string {
+	// Find "Host:" header (case-insensitive search)
+	lower := bytes.ToLower(data)
+	idx := bytes.Index(lower, []byte("\r\nhost:"))
+	if idx == -1 {
+		// Try at start (unlikely but possible)
+		if bytes.HasPrefix(lower, []byte("host:")) {
+			idx = -2 // Adjust for missing \r\n
+		} else {
+			return fallback
+		}
 	}
 
-	// Check error type
-	if err == io.EOF {
-		return false // Client closed
+	// Skip "\r\nhost:" (or "host:" if at start)
+	start := idx + 7
+	if idx == -2 {
+		start = 5
 	}
 
-	if strings.Contains(err.Error(), "timeout") {
-		return true // Timeout = no data but connection alive
+	// Find end of header value
+	end := bytes.Index(data[start:], []byte("\r\n"))
+	if end == -1 {
+		end = len(data) - start
 	}
 
-	return false // Other errors = connection dead
+	// Trim whitespace and extract host (remove port if present)
+	hostVal := bytes.TrimSpace(data[start : start+end])
+	if colonIdx := bytes.LastIndexByte(hostVal, ':'); colonIdx != -1 {
+		hostVal = hostVal[:colonIdx]
+	}
+
+	if len(hostVal) == 0 {
+		return fallback
+	}
+	return string(hostVal)
 }
 
-func handleClientWithCapture(client net.Conn, host string, port int) {
-	// Read first data
-	buf := make([]byte, 4096)
-	n, err := client.Read(buf)
-	if err != nil {
-		return
-	}
-	firstData := buf[:n]
-
-	// 1. CONNECT request (proxy mode)
-	// 2. TLS handshake
-
-	if bytes.HasPrefix(firstData, []byte("CONNECT ")) || isTLSHandshake(firstData) && config.TLSCert != "" {
-		// Handle TLS with unified function
-		handleTLSConnection(client, host, port, firstData)
-		return
-	}
-
-	// For HTTP or direct capture
-	var proxy net.Conn
-
-	if config.ProxyType == "capture" {
-		// Direct connection
-		proxy, err = net.DialTimeout("tcp",
-			fmt.Sprintf("%s:%d", host, port),
-			time.Duration(config.Timeout)*time.Second)
-	} else {
-		// Through proxy
-		proxy, err = net.DialTimeout("tcp",
-			fmt.Sprintf("%s:%d", config.ProxyHost, config.ProxyPort),
-			time.Duration(config.Timeout)*time.Second)
-	}
-
-	if err != nil {
-		debugf("Failed to connect: %v", err)
-		return
-	}
-	defer proxy.Close()
-
-	switch config.ProxyType {
-	case "http":
-		if err := setupHTTPProxy(proxy, client, firstData, host, port); err != nil {
-			return
-		}
-	case "socks5":
-		if err := setupSOCKS5Proxy(proxy, host, port); err != nil {
-			return
-		}
-		proxy.Write(firstData)
-	case "capture":
-		// Direct connection - just forward the data
-		proxy.Write(firstData)
-	}
-	// Capture HTTP data
-	captureHTTP(client, proxy, firstData, host, port)
-}
-
+// getOriginalDst retrieves original destination via SO_ORIGINAL_DST
 func getOriginalDst(conn net.Conn) (string, int, error) {
 	tcpConn, ok := conn.(*net.TCPConn)
 	if !ok {
@@ -247,7 +298,6 @@ func getOriginalDst(conn net.Conn) (string, int, error) {
 
 	fd := int(file.Fd())
 
-	// Get original destination using SO_ORIGINAL_DST
 	var addr syscall.RawSockaddrInet4
 	size := uint32(syscall.SizeofSockaddrInet4)
 
@@ -265,139 +315,86 @@ func getOriginalDst(conn net.Conn) (string, int, error) {
 		return "", 0, fmt.Errorf("getsockopt failed: %v", errno)
 	}
 
-	// Convert to IP and port
 	ip := net.IPv4(addr.Addr[0], addr.Addr[1], addr.Addr[2], addr.Addr[3])
 	port := int(addr.Port>>8) | int(addr.Port&0xff)<<8
 
 	return ip.String(), port, nil
 }
 
-func parseConnectTarget(connectData []byte) string {
-	lines := strings.Split(string(connectData), "\r\n")
-	if len(lines) < 1 {
-		return ""
-	}
+// isClientAlive checks if client connection is still active
+// BUG 2 FIX: Use zero-byte write to check without consuming data
+func isClientAlive(client net.Conn) bool {
+	// Try zero-byte write - fails if connection is closed
+	client.SetWriteDeadline(time.Now().Add(1 * time.Millisecond))
+	_, err := client.Write([]byte{})
+	client.SetWriteDeadline(time.Time{})
 
-	// Parse "CONNECT api.example.com:443 HTTP/1.1"
-	parts := strings.Fields(lines[0])
-	if len(parts) < 2 || !strings.HasPrefix(parts[0], "CONNECT") {
-		return ""
-	}
-
-	// Extract hostname from "host:port"
-	hostPort := parts[1]
-	if idx := strings.LastIndex(hostPort, ":"); idx != -1 {
-		return hostPort[:idx]
-	}
-
-	return hostPort
-}
-
-func determineTargetHostname(host string, connectData []byte, isConnectRequest bool) string {
-	if isConnectRequest {
-		// Proxy HTTP - extract from CONNECT
-		return parseConnectTarget(connectData)
-	} else {
-		// Direct TLS handshake - extract SNI from ClientHello
-		if sni := extractSNIFromClientHello(connectData); sni != "" {
-			return sni
-		}
-		// Fallback to IP - add a fatal() here?
-		debugf("No hostName from TLS context!")
-		return host
-	}
-}
-
-func handleTLSConnection(client net.Conn, host string, port int, connectData []byte) {
-	var isConnectRequest bool
-
-	// Parse target host
-	if connectData != nil && bytes.HasPrefix(connectData, []byte("CONNECT ")) {
-		// CONNECT request
-		isConnectRequest = true
-	}
-
-	if len(connectData) > 0 {
-		client = &prefixedConn{
-			Conn:       client,
-			prefixData: connectData,
-		}
-		debugf("Wrapped connection with %d bytes of prefix data", len(connectData))
-	}
-	realHostname := determineTargetHostname(host, connectData, isConnectRequest)
-	debugf("Handling TLS - Original: %s:%d, Real hostname: %s", host, port, realHostname)
-	// 2. Setup client TLS
-	tlsClient, err := setupClientTLSConnection(client, realHostname, isConnectRequest)
 	if err != nil {
-		debugf("Failed to setup client TLS: %v", err)
-		return
+		// Write failed - connection likely dead
+		return false
 	}
-	defer tlsClient.Close()
 
-	// 1. Setup server connection
-	tlsServer, err := setupServerTLSConnection(realHostname, host, port)
-	if err != nil {
-		debugf("Failed to setup server TLS: %v", err)
-		return
+	// Connection is writable, check if readable without blocking
+	client.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
+	var peek [1]byte
+	n, err := client.Read(peek[:])
+	client.SetReadDeadline(time.Time{})
+
+	// If we read data, connection is alive (though we consumed 1 byte)
+	if n > 0 {
+		debugf("Warning: isClientAlive consumed 1 byte during check")
+		return true
 	}
-	defer tlsServer.Close()
 
-	// 3. Capture traffic
-	captureTLS(tlsClient, tlsServer, fmt.Sprintf("%s:%d", realHostname, port))
+	// EOF means closed
+	if err == io.EOF {
+		return false
+	}
+
+	// Timeout means alive but no pending data
+	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		return true
+	}
+
+	return false
 }
 
-// relayBidirectional performs bidirectional relay with immediate reconnect on proxy death
-// Returns true if proxy died first, false if client died first
+// relayBidirectional performs bidirectional data relay
+// Returns true if proxy died first, false if client died
 func relayBidirectional(client, proxy net.Conn, target string, showStats bool) bool {
 	done := make(chan bool, 2)
-	proxyDiedChan := make(chan bool, 1) // New: Communication between goroutines
+	proxyDiedChan := make(chan struct{})
 	var clientToProxy, proxyToClient int64
 	var proxyDied, clientDied bool
 
 	// Client to Proxy
 	go func() {
 		defer func() { done <- true }()
+		buf := bufPool4K.Get().([]byte)
+		defer bufPool4K.Put(buf)
 
-		buf := make([]byte, 4*1024)
 		for {
-			// Check if proxy died before trying to read from client
 			select {
 			case <-proxyDiedChan:
-				debugf("Client→Proxy: Proxy died, terminating client relay for reconnection")
-				return // Exit immediately to allow reconnection
+				return
 			default:
-				// Continue with normal read
 			}
 
 			n, err := client.Read(buf)
 			if err != nil {
-				if err == io.EOF || isConnectionClosed(err) {
-					debugf("Client read ended: %v", err)
-					clientDied = true
-				} else {
-					debugf("Client read error: %v", err)
-					clientDied = true
-				}
+				clientDied = true
 				break
 			}
 
-			written, err := proxy.Write(buf[:n])
-			if err != nil {
-				debugf("Proxy write error (proxy died): %v", err)
+			if _, err := proxy.Write(buf[:n]); err != nil {
 				proxyDied = true
-				// Signal proxy death to other goroutine
-				select {
-				case proxyDiedChan <- true:
-				default:
-				}
+				close(proxyDiedChan)
 				break
 			}
 
-			clientToProxy += int64(written)
+			clientToProxy += int64(n)
 			if showStats {
 				printStats(target, clientToProxy, proxyToClient)
-			} else {
-				debugf("Client→Proxy: %d bytes", written)
 			}
 		}
 	}()
@@ -405,75 +402,151 @@ func relayBidirectional(client, proxy net.Conn, target string, showStats bool) b
 	// Proxy to Client
 	go func() {
 		defer func() { done <- true }()
+		buf := bufPool4K.Get().([]byte)
+		defer bufPool4K.Put(buf)
 
-		buf := make([]byte, 4*1024)
 		for {
-			// Check if we should terminate due to proxy death signal
 			select {
 			case <-proxyDiedChan:
-				debugf("Proxy→Client: Received proxy death signal, terminating")
 				return
 			default:
-				// Continue with normal read
 			}
 
 			n, err := proxy.Read(buf)
 			if err != nil {
-				if err == io.EOF || isConnectionClosed(err) {
-					debugf("Proxy read ended: %v", err)
-					proxyDied = true
-				} else {
-					debugf("Proxy read error: %v", err)
-					proxyDied = true
-				}
-
-				// Signal proxy death to client goroutine for immediate termination
+				proxyDied = true
 				select {
-				case proxyDiedChan <- true:
-					debugf("Signaled proxy death for immediate reconnection")
+				case <-proxyDiedChan:
 				default:
+					close(proxyDiedChan)
 				}
 				break
 			}
 
-			written, err := client.Write(buf[:n])
-			if err != nil {
-				debugf("Client write error (client died): %v", err)
+			if _, err := client.Write(buf[:n]); err != nil {
 				clientDied = true
 				break
 			}
 
-			proxyToClient += int64(written)
+			proxyToClient += int64(n)
 			if showStats {
 				printStats(target, clientToProxy, proxyToClient)
-			} else {
-				debugf("Proxy→Client: %d bytes", written)
 			}
 		}
 	}()
 
-	// Wait for both directions to complete
 	<-done
 	<-done
 
-	// Print final stats if enabled
 	if showStats {
+		status := "CLOSED"
+		if proxyDied {
+			status = "PROXY DIED"
+		} else if clientDied {
+			status = "CLIENT DIED"
+		}
 		fmt.Printf("\r[%s] %s - TX: %s, RX: %s [%s]\n",
-			time.Now().Format("15:04:05"),
-			target,
-			formatBytes(clientToProxy),
-			formatBytes(proxyToClient),
-			func() string {
-				if proxyDied {
-					return "PROXY DIED"
-				}
-				if clientDied {
-					return "CLIENT DIED"
-				}
-				return "CLOSED"
-			}())
+			time.Now().Format("15:04:05"), target,
+			formatBytes(clientToProxy), formatBytes(proxyToClient), status)
 	}
 
-	debugf("Relay ended - ProxyDied: %v, ClientDied: %v", proxyDied, clientDied)
 	return proxyDied
+}
+
+// prefixedConn wraps connection with pre-read data buffer
+// BUG 3 FIX: Handle partial reads correctly
+type prefixedConn struct {
+	net.Conn
+	prefix []byte
+	offset int
+}
+
+func (p *prefixedConn) Read(b []byte) (int, error) {
+	// First, drain any remaining prefix data
+	if p.offset < len(p.prefix) {
+		n := copy(b, p.prefix[p.offset:])
+		p.offset += n
+		return n, nil
+	}
+	// Then read from underlying connection
+	return p.Conn.Read(b)
+}
+
+// debugConn wraps connection with I/O logging
+type debugConn struct {
+	net.Conn
+	name string
+}
+
+func (d *debugConn) Read(b []byte) (int, error) {
+	n, err := d.Conn.Read(b)
+	if n > 0 {
+		debugf("%s READ: %d bytes", d.name, n)
+	}
+	return n, err
+}
+
+func (d *debugConn) Write(b []byte) (int, error) {
+	n, err := d.Conn.Write(b)
+	debugf("%s WRITE: %d bytes", d.name, n)
+	return n, err
+}
+
+// parseConnectTarget extracts host from CONNECT request
+func parseConnectTarget(data []byte) string {
+	lineEnd := bytes.Index(data, []byte("\r\n"))
+	if lineEnd == -1 {
+		lineEnd = len(data)
+	}
+
+	parts := bytes.Fields(data[:lineEnd])
+	if len(parts) < 2 || !bytes.Equal(parts[0], []byte("CONNECT")) {
+		return ""
+	}
+
+	hostPort := parts[1]
+	if idx := bytes.LastIndexByte(hostPort, ':'); idx != -1 {
+		return string(hostPort[:idx])
+	}
+	return string(hostPort)
+}
+
+// determineTargetHostname resolves actual hostname from connection data
+func determineTargetHostname(host string, data []byte, isConnect bool) string {
+	if isConnect {
+		return parseConnectTarget(data)
+	}
+	if sni := extractSNIFromClientHello(data); sni != "" {
+		return sni
+	}
+	debugf("No hostname from TLS context, using IP")
+	return host
+}
+
+// handleTLSIntercept handles TLS interception for capture mode
+func handleTLSIntercept(client net.Conn, host string, port int, data []byte) {
+	isConnect := bytes.HasPrefix(data, []byte("CONNECT "))
+
+	if len(data) > 0 {
+		client = &prefixedConn{Conn: client, prefix: data, offset: 0}
+	}
+
+	realHost := determineTargetHostname(host, data, isConnect)
+	debugf("TLS interception - Host: %s, Real: %s", host, realHost)
+
+	tlsClient, err := setupClientTLSConnection(client, realHost, isConnect)
+	if err != nil {
+		debugf("Client TLS setup failed: %v", err)
+		return
+	}
+	defer tlsClient.Close()
+
+	tlsServer, err := setupServerTLSConnection(realHost, host, port)
+	if err != nil {
+		debugf("Server TLS setup failed: %v", err)
+		return
+	}
+	defer tlsServer.Close()
+
+	captureTLS(tlsClient, tlsServer, fmt.Sprintf("%s:%d", realHost, port))
 }

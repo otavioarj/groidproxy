@@ -10,13 +10,13 @@ import (
 	"time"
 )
 
+// captureHTTP captures plain HTTP traffic for database storage
 func captureHTTP(client, server net.Conn, firstReq []byte, host string, port int) {
 	capture := &CaptureData{
 		Timestamp: time.Now().UnixNano(),
 	}
 
-	// Parse first request
-	// Parse first request (already sent by setupHTTPProxy, so don't re-send)
+	// Parse first request for metadata
 	if lines := strings.Split(string(firstReq), "\r\n"); len(lines) > 0 {
 		parts := strings.Fields(lines[0])
 		if len(parts) >= 2 {
@@ -25,14 +25,17 @@ func captureHTTP(client, server net.Conn, firstReq []byte, host string, port int
 		}
 	}
 
-	// Accumulate request - NOTE: firstReq already sent, so start with empty buffer
+	// Include firstReq in capture (already sent to server, needed for DB)
 	var requestBuf bytes.Buffer
-	//DO NOT write firstReq to requestBuf since it was already sent, no requestBuf.Write(firstReq) here
+	requestBuf.Write(firstReq)
 
-	// Forward and capture request
 	done := make(chan bool, 2)
+
+	// Client to Server with capture
 	go func() {
-		buf := make([]byte, 4096)
+		buf := bufPool4K.Get().([]byte)
+		defer bufPool4K.Put(buf)
+
 		for requestBuf.Len() < MAX_CAPTURE_SIZE {
 			n, err := client.Read(buf)
 			if err != nil {
@@ -46,10 +49,12 @@ func captureHTTP(client, server net.Conn, firstReq []byte, host string, port int
 		done <- true
 	}()
 
-	// Capture response
+	// Server to Client with capture
 	var responseBuf bytes.Buffer
 	go func() {
-		buf := make([]byte, 4096)
+		buf := bufPool4K.Get().([]byte)
+		defer bufPool4K.Put(buf)
+
 		for responseBuf.Len() < MAX_CAPTURE_SIZE {
 			n, err := server.Read(buf)
 			if err != nil {
@@ -63,11 +68,9 @@ func captureHTTP(client, server net.Conn, firstReq []byte, host string, port int
 		done <- true
 	}()
 
-	// Wait for completion
 	<-done
 	<-done
 
-	// Save capture
 	capture.Request = requestBuf.Bytes()
 	capture.Response = responseBuf.Bytes()
 
@@ -78,8 +81,18 @@ func captureHTTP(client, server net.Conn, firstReq []byte, host string, port int
 	}
 }
 
+// captureTLS captures decrypted TLS traffic using HTTP pairing
+// BUG 4 FIX: Added MAX_CAPTURE_SIZE limit to prevent OOM
+// BUG 8 FIX: Check if httpPairer is initialized
 func captureTLS(client, server *tls.Conn, targetHost string) {
-	debugf("Starting TLS capture with HTTP pairing for %s", targetHost)
+	debugf("Starting TLS capture for %s", targetHost)
+
+	// BUG 8 FIX: Safety check for httpPairer
+	if httpPairer == nil {
+		debugf("Warning: httpPairer not initialized, falling back to relay")
+		relayTLS(client, server, targetHost)
+		return
+	}
 
 	done := make(chan bool, 2)
 
@@ -87,7 +100,9 @@ func captureTLS(client, server *tls.Conn, targetHost string) {
 	go func() {
 		defer func() { done <- true }()
 
-		buf := make([]byte, 4096)
+		buf := bufPool4K.Get().([]byte)
+		defer bufPool4K.Put(buf)
+
 		var requestBuffer bytes.Buffer
 
 		for {
@@ -99,20 +114,25 @@ func captureTLS(client, server *tls.Conn, targetHost string) {
 			// Forward to server immediately (relay is priority)
 			server.Write(buf[:n])
 
-			// Accumulate request data for capture
+			// BUG 4 FIX: Check size limit before accumulating
+			if requestBuffer.Len()+n > MAX_CAPTURE_SIZE {
+				debugf("Request buffer exceeds limit, skipping capture")
+				// Drain remaining without capture
+				io.Copy(server, client)
+				break
+			}
+
 			requestBuffer.Write(buf[:n])
 
 			// Check if we have a complete HTTP request
 			if isCompleteHTTPMessage(requestBuffer.Bytes()) {
-				// Add complete request to pairing queue
 				httpPairer.addRequest(requestBuffer.Bytes(), targetHost)
 				requestBuffer.Reset()
 			}
 		}
 
-		// Handle any remaining partial request data
 		if requestBuffer.Len() > 0 {
-			debugf("Partial request data remaining: %d bytes for %s", requestBuffer.Len(), targetHost)
+			debugf("Partial request data: %d bytes for %s", requestBuffer.Len(), targetHost)
 		}
 	}()
 
@@ -120,7 +140,9 @@ func captureTLS(client, server *tls.Conn, targetHost string) {
 	go func() {
 		defer func() { done <- true }()
 
-		buf := make([]byte, 4096)
+		buf := bufPool4K.Get().([]byte)
+		defer bufPool4K.Put(buf)
+
 		var responseBuffer bytes.Buffer
 
 		for {
@@ -132,26 +154,54 @@ func captureTLS(client, server *tls.Conn, targetHost string) {
 			// Forward to client immediately (relay is priority)
 			client.Write(buf[:n])
 
-			// Accumulate response data for capture
+			// BUG 4 FIX: Check size limit before accumulating
+			if responseBuffer.Len()+n > MAX_CAPTURE_SIZE {
+				debugf("Response buffer exceeds limit, skipping capture")
+				// Drain remaining without capture
+				io.Copy(client, server)
+				break
+			}
+
 			responseBuffer.Write(buf[:n])
 
 			// Check if we have a complete HTTP response
 			if isCompleteHTTPMessage(responseBuffer.Bytes()) {
-				// Add complete response to pairing system
 				httpPairer.addResponse(responseBuffer.Bytes(), targetHost)
 				responseBuffer.Reset()
 			}
 		}
 
-		// Handle any remaining partial response data
 		if responseBuffer.Len() > 0 {
-			debugf("Partial response data remaining: %d bytes for %s", responseBuffer.Len(), targetHost)
+			debugf("Partial response data: %d bytes for %s", responseBuffer.Len(), targetHost)
 		}
 	}()
 
-	// Wait for both directions to complete
 	<-done
 	<-done
 
 	debugf("TLS capture ended for %s", targetHost)
+}
+
+// relayTLS performs simple TLS relay without capture (fallback)
+func relayTLS(client, server *tls.Conn, target string) {
+	done := make(chan bool, 2)
+
+	go func() {
+		buf := bufPool4K.Get().([]byte)
+		defer bufPool4K.Put(buf)
+		io.CopyBuffer(server, client, buf)
+		done <- true
+	}()
+
+	go func() {
+		buf := bufPool4K.Get().([]byte)
+		defer bufPool4K.Put(buf)
+		io.CopyBuffer(client, server, buf)
+		done <- true
+	}()
+
+	<-done
+	<-done
+
+	debugf("TLS relay ended for %s", target)
 }
