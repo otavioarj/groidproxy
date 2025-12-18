@@ -82,12 +82,11 @@ func captureHTTP(client, server net.Conn, firstReq []byte, host string, port int
 }
 
 // captureTLS captures decrypted TLS traffic using HTTP pairing
-// BUG 4 FIX: Added MAX_CAPTURE_SIZE limit to prevent OOM
-// BUG 8 FIX: Check if httpPairer is initialized
+// Enforces memory limits and validates pairer initialization
 func captureTLS(client, server *tls.Conn, targetHost string) {
 	debugf("Starting TLS capture for %s", targetHost)
 
-	// BUG 8 FIX: Safety check for httpPairer
+	// Safety check - fall back to simple relay if pairer unavailable
 	if httpPairer == nil {
 		debugf("Warning: httpPairer not initialized, falling back to relay")
 		relayTLS(client, server, targetHost)
@@ -114,10 +113,9 @@ func captureTLS(client, server *tls.Conn, targetHost string) {
 			// Forward to server immediately (relay is priority)
 			server.Write(buf[:n])
 
-			// BUG 4 FIX: Check size limit before accumulating
+			// Enforce memory limit - stop capturing if exceeded
 			if requestBuffer.Len()+n > MAX_CAPTURE_SIZE {
 				debugf("Request buffer exceeds limit, skipping capture")
-				// Drain remaining without capture
 				io.Copy(server, client)
 				break
 			}
@@ -154,10 +152,9 @@ func captureTLS(client, server *tls.Conn, targetHost string) {
 			// Forward to client immediately (relay is priority)
 			client.Write(buf[:n])
 
-			// BUG 4 FIX: Check size limit before accumulating
+			// Enforce memory limit - stop capturing if exceeded
 			if responseBuffer.Len()+n > MAX_CAPTURE_SIZE {
 				debugf("Response buffer exceeds limit, skipping capture")
-				// Drain remaining without capture
 				io.Copy(client, server)
 				break
 			}

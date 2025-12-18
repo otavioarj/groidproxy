@@ -21,7 +21,7 @@ const (
 	ConnUnknown                 // Unknown/binary protocol
 )
 
-// Pre-allocated method prefixes for efficient detection (OPT 10)
+// Pre-allocated HTTP method prefixes for efficient protocol detection
 var httpMethods = [][]byte{
 	[]byte("GET "),
 	[]byte("POST "),
@@ -33,7 +33,7 @@ var httpMethods = [][]byte{
 	[]byte("TRACE "),
 }
 
-// Buffer pools to reduce allocations (OPT 11)
+// Buffer pools to reduce allocations in hot paths
 var (
 	bufPool4K = sync.Pool{New: func() interface{} { return make([]byte, 4*1024) }}
 	bufPool1K = sync.Pool{New: func() interface{} { return make([]byte, 1024) }}
@@ -57,7 +57,7 @@ func detectConnType(data []byte) ConnType {
 		return ConnCONNECT
 	}
 
-	// OPT 10: use pre-allocated slices
+	// Check HTTP methods using pre-allocated slices
 	for _, m := range httpMethods {
 		if bytes.HasPrefix(data, m) {
 			return ConnHTTP
@@ -111,13 +111,14 @@ func handleHTTPS(client net.Conn, firstData []byte, host string, port int, connT
 		return
 	}
 
-	// BUG 1 FIX: For CONNECT requests without interception, respond 200 first
+	// For explicit CONNECT requests (client using us as HTTP proxy),
+	// we must acknowledge the tunnel before client sends TLS handshake
 	if connType == ConnCONNECT {
 		if _, err := client.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n")); err != nil {
 			debugf("Failed to send CONNECT response: %v", err)
 			return
 		}
-		// Read actual TLS ClientHello from client
+		// Now read the actual TLS ClientHello that follows
 		buf := bufPool4K.Get().([]byte)
 		n, err := client.Read(buf)
 		if err != nil {
@@ -136,7 +137,7 @@ func handleHTTPS(client net.Conn, firstData []byte, host string, port int, connT
 // handleHTTP handles plain HTTP requests
 // Supports capture mode and proxy forwarding
 func handleHTTP(client net.Conn, firstData []byte, host string, port int) {
-	// BUG 6 FIX: Single blacklist check here, removed from setupHTTPDirect
+	// Single blacklist check point for HTTP traffic
 	targetHost := extractHTTPHost(firstData, host)
 	if isBlacklisted(targetHost) || isBlacklisted(host) {
 		debugf("Blocked connection to %s", targetHost)
@@ -209,7 +210,7 @@ func handleTunnel(client net.Conn, firstData []byte, host string, port int, isTu
 }
 
 // setupUpstreamConn configures upstream proxy connection
-// OPT 9: Inlined setupHTTPProxy logic
+// Handles both HTTP and SOCKS5 proxy types with tunnel/direct modes
 func setupUpstreamConn(proxy net.Conn, firstData []byte, host string, port int, isTunnel bool) error {
 	switch config.ProxyType {
 	case "http":
@@ -222,7 +223,7 @@ func setupUpstreamConn(proxy net.Conn, firstData []byte, host string, port int, 
 				return err
 			}
 		}
-		// Send firstData through tunnel after CONNECT established
+		// Forward original data through established tunnel
 		if isTunnel && firstData != nil {
 			_, err := proxy.Write(firstData)
 			return err
@@ -245,21 +246,20 @@ func setupUpstreamConn(proxy net.Conn, firstData []byte, host string, port int, 
 }
 
 // extractHTTPHost extracts hostname from HTTP Host header
-// OPT 12: Zero-allocation version using bytes operations
+// Uses byte operations to avoid string allocations
 func extractHTTPHost(data []byte, fallback string) string {
-	// Find "Host:" header (case-insensitive search)
+	// Case-insensitive search for Host header
 	lower := bytes.ToLower(data)
 	idx := bytes.Index(lower, []byte("\r\nhost:"))
 	if idx == -1 {
-		// Try at start (unlikely but possible)
 		if bytes.HasPrefix(lower, []byte("host:")) {
-			idx = -2 // Adjust for missing \r\n
+			idx = -2 // Header at start (no preceding \r\n)
 		} else {
 			return fallback
 		}
 	}
 
-	// Skip "\r\nhost:" (or "host:" if at start)
+	// Calculate value start position
 	start := idx + 7
 	if idx == -2 {
 		start = 5
@@ -271,7 +271,7 @@ func extractHTTPHost(data []byte, fallback string) string {
 		end = len(data) - start
 	}
 
-	// Trim whitespace and extract host (remove port if present)
+	// Extract host, stripping port if present
 	hostVal := bytes.TrimSpace(data[start : start+end])
 	if colonIdx := bytes.LastIndexByte(hostVal, ':'); colonIdx != -1 {
 		hostVal = hostVal[:colonIdx]
@@ -283,7 +283,9 @@ func extractHTTPHost(data []byte, fallback string) string {
 	return string(hostVal)
 }
 
-// getOriginalDst retrieves original destination via SO_ORIGINAL_DST
+// getOriginalDst retrieves original destination from iptables REDIRECT
+// Uses SO_ORIGINAL_DST socket option to get the pre-NAT destination
+// Required for transparent proxy operation on Android/Linux
 func getOriginalDst(conn net.Conn) (string, int, error) {
 	tcpConn, ok := conn.(*net.TCPConn)
 	if !ok {
@@ -298,6 +300,7 @@ func getOriginalDst(conn net.Conn) (string, int, error) {
 
 	fd := int(file.Fd())
 
+	// Query kernel for original destination address
 	var addr syscall.RawSockaddrInet4
 	size := uint32(syscall.SizeofSockaddrInet4)
 
@@ -315,6 +318,7 @@ func getOriginalDst(conn net.Conn) (string, int, error) {
 		return "", 0, fmt.Errorf("getsockopt failed: %v", errno)
 	}
 
+	// Convert network byte order to host byte order
 	ip := net.IPv4(addr.Addr[0], addr.Addr[1], addr.Addr[2], addr.Addr[3])
 	port := int(addr.Port>>8) | int(addr.Port&0xff)<<8
 
@@ -322,36 +326,31 @@ func getOriginalDst(conn net.Conn) (string, int, error) {
 }
 
 // isClientAlive checks if client connection is still active
-// BUG 2 FIX: Use zero-byte write to check without consuming data
+// Uses zero-byte write followed by deadline-based read check
 func isClientAlive(client net.Conn) bool {
-	// Try zero-byte write - fails if connection is closed
+	// Zero-byte write fails immediately if connection is closed
 	client.SetWriteDeadline(time.Now().Add(1 * time.Millisecond))
 	_, err := client.Write([]byte{})
 	client.SetWriteDeadline(time.Time{})
 
 	if err != nil {
-		// Write failed - connection likely dead
 		return false
 	}
 
-	// Connection is writable, check if readable without blocking
+	// Check readability with short timeout
 	client.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
 	var peek [1]byte
 	n, err := client.Read(peek[:])
 	client.SetReadDeadline(time.Time{})
 
-	// If we read data, connection is alive (though we consumed 1 byte)
 	if n > 0 {
 		debugf("Warning: isClientAlive consumed 1 byte during check")
 		return true
 	}
-
-	// EOF means closed
 	if err == io.EOF {
 		return false
 	}
-
-	// Timeout means alive but no pending data
+	// Timeout indicates alive connection with no pending data
 	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 		return true
 	}
@@ -359,21 +358,23 @@ func isClientAlive(client net.Conn) bool {
 	return false
 }
 
-// relayBidirectional performs bidirectional data relay
-// Returns true if proxy died first, false if client died
+// relayBidirectional performs bidirectional data relay between connections
+// Returns true if proxy died first (enables reconnection), false if client died
+// Uses channel coordination to detect which side failed and enable early exit
 func relayBidirectional(client, proxy net.Conn, target string, showStats bool) bool {
-	done := make(chan bool, 2)
-	proxyDiedChan := make(chan struct{})
+	done := make(chan bool, 2)           // Signals goroutine completion
+	proxyDiedChan := make(chan struct{}) // Coordinates early exit on proxy failure
 	var clientToProxy, proxyToClient int64
 	var proxyDied, clientDied bool
 
-	// Client to Proxy
+	// Client to Proxy goroutine
 	go func() {
 		defer func() { done <- true }()
 		buf := bufPool4K.Get().([]byte)
 		defer bufPool4K.Put(buf)
 
 		for {
+			// Check if proxy already died (early exit)
 			select {
 			case <-proxyDiedChan:
 				return
@@ -399,13 +400,14 @@ func relayBidirectional(client, proxy net.Conn, target string, showStats bool) b
 		}
 	}()
 
-	// Proxy to Client
+	// Proxy to Client goroutine
 	go func() {
 		defer func() { done <- true }()
 		buf := bufPool4K.Get().([]byte)
 		defer bufPool4K.Put(buf)
 
 		for {
+			// Check if proxy already died (early exit)
 			select {
 			case <-proxyDiedChan:
 				return
@@ -415,6 +417,7 @@ func relayBidirectional(client, proxy net.Conn, target string, showStats bool) b
 			n, err := proxy.Read(buf)
 			if err != nil {
 				proxyDied = true
+				// Safe close - check if already closed
 				select {
 				case <-proxyDiedChan:
 				default:
@@ -435,6 +438,7 @@ func relayBidirectional(client, proxy net.Conn, target string, showStats bool) b
 		}
 	}()
 
+	// Wait for both goroutines to complete
 	<-done
 	<-done
 
@@ -454,7 +458,7 @@ func relayBidirectional(client, proxy net.Conn, target string, showStats bool) b
 }
 
 // prefixedConn wraps connection with pre-read data buffer
-// BUG 3 FIX: Handle partial reads correctly
+// Supports partial reads by tracking offset into prefix data
 type prefixedConn struct {
 	net.Conn
 	prefix []byte
@@ -462,13 +466,12 @@ type prefixedConn struct {
 }
 
 func (p *prefixedConn) Read(b []byte) (int, error) {
-	// First, drain any remaining prefix data
+	// Drain remaining prefix data first
 	if p.offset < len(p.prefix) {
 		n := copy(b, p.prefix[p.offset:])
 		p.offset += n
 		return n, nil
 	}
-	// Then read from underlying connection
 	return p.Conn.Read(b)
 }
 
@@ -523,17 +526,22 @@ func determineTargetHostname(host string, data []byte, isConnect bool) string {
 	return host
 }
 
-// handleTLSIntercept handles TLS interception for capture mode
+// handleTLSIntercept performs MITM TLS interception for traffic capture
+// Flow: Client <-> [GroidProxy with generated cert] <-> Server
+// Decrypts traffic to capture cleartext HTTP inside TLS
 func handleTLSIntercept(client net.Conn, host string, port int, data []byte) {
 	isConnect := bytes.HasPrefix(data, []byte("CONNECT "))
 
+	// Wrap client with prefixed data to replay initial bytes during TLS handshake
 	if len(data) > 0 {
 		client = &prefixedConn{Conn: client, prefix: data, offset: 0}
 	}
 
+	// Determine actual hostname from CONNECT request or SNI extension
 	realHost := determineTargetHostname(host, data, isConnect)
 	debugf("TLS interception - Host: %s, Real: %s", host, realHost)
 
+	// Setup TLS with client using dynamically generated certificate
 	tlsClient, err := setupClientTLSConnection(client, realHost, isConnect)
 	if err != nil {
 		debugf("Client TLS setup failed: %v", err)
@@ -541,6 +549,7 @@ func handleTLSIntercept(client net.Conn, host string, port int, data []byte) {
 	}
 	defer tlsClient.Close()
 
+	// Connect to real server (directly or through upstream proxy)
 	tlsServer, err := setupServerTLSConnection(realHost, host, port)
 	if err != nil {
 		debugf("Server TLS setup failed: %v", err)
@@ -548,5 +557,6 @@ func handleTLSIntercept(client net.Conn, host string, port int, data []byte) {
 	}
 	defer tlsServer.Close()
 
+	// Relay and capture decrypted traffic
 	captureTLS(tlsClient, tlsServer, fmt.Sprintf("%s:%d", realHost, port))
 }

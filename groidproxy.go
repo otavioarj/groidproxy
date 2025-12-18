@@ -5,7 +5,7 @@ import (
 	"crypto/x509"
 	"database/sql"
 	"flag"
-	"fmt"	
+	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -16,8 +16,9 @@ import (
 
 const (
 	CHAIN_NAME      = "GROID_OUT"
-	VERSION         = "1.3.0"
+	VERSION         = "1.3.1"
 	SO_ORIGINAL_DST = 80
+	SESS_FILE       = ".groidf" // Session file, used to verify clean shutdown
 )
 
 // HTTPPair represents a complete HTTP request/response pair
@@ -208,8 +209,17 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Initialize iptables chain
+	// Check for unclean shutdown from previous session
+	if _, err := os.Stat(SESS_FILE); err == nil {
+		logf("Last session died? Flushing rules")
+		flushRules()
+	}
+
+	// Inits iptable rules etc.
 	initChain()
+	// Session file removed at cleanup stage
+	os.WriteFile(SESS_FILE, []byte{}, 0644)
+
 	// Apply rules
 	if config.UseGlobal {
 		applyGlobalRules()
@@ -266,4 +276,5 @@ func main() {
 			removePackageRules(pkg)
 		}
 	}
+	os.Remove(SESS_FILE) // Cleanup completed :)
 }

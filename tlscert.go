@@ -24,15 +24,15 @@ func isTLSHandshake(data []byte) bool {
 	return len(data) > 3 && data[0] == 0x16 && data[1] == 0x03
 }
 
-func loadP12Certificate(certPath, password string) error {
-	p12Data, err := os.ReadFile(certPath)
+func loadPkcs12Certificate(certPath, password string) error {
+	pkcs12Data, err := os.ReadFile(certPath)
 	if err != nil {
-		return fmt.Errorf("failed to read P12 file: %v", err)
+		return fmt.Errorf("failed to read Pkcs12 file: %v", err)
 	}
 
-	blocks, err := pkcs12.ToPEM(p12Data, password) //deprecated function, invalid for PKC#8
+	blocks, err := pkcs12.ToPEM(pkcs12Data, password) //deprecated function, invalid for PKC#8!!
 	if err != nil {
-		return fmt.Errorf("failed to parse P12: %v", err)
+		return fmt.Errorf("failed to parse Pkcs12: %v", err)
 	}
 
 	var pemData []byte
@@ -58,7 +58,7 @@ func loadP12Certificate(certPath, password string) error {
 	}
 
 	if caCert == nil || caKey == nil {
-		return fmt.Errorf("failed to extract CA certificate and key from P12")
+		return fmt.Errorf("failed to extract CA certificate and key from Pkcs12")
 	}
 	return nil
 }

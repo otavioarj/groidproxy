@@ -38,7 +38,6 @@ func setupHTTPTunnel(proxy net.Conn, host string, port int) error {
 
 // setupHTTPDirect forwards plain HTTP request through proxy
 // Rewrites relative URL to absolute URL per RFC 7230
-// BUG 6 FIX: Removed duplicate blacklist check (now only in handleHTTP)
 func setupHTTPDirect(proxy net.Conn, firstData []byte, host string, port int) error {
 	// Rewrite request with absolute URL
 	rewritten := rewriteHTTPAbsolute(firstData, host, port)
@@ -89,10 +88,9 @@ func rewriteHTTPAbsolute(data []byte, host string, port int) []byte {
 }
 
 // setupSOCKS5Proxy establishes SOCKS5 connection to target
-// BUG 5 FIX: Check blacklist BEFORE handshake
-// BUG 7 FIX: Removed redundant blacklist check
+// Validates blacklist before handshake to avoid wasted resources
 func setupSOCKS5Proxy(proxy net.Conn, host string, port int) error {
-	// BUG 5 FIX: Check blacklist first, before any network I/O
+	// Check blacklist first, before any network I/O
 	if isBlacklisted(host) {
 		return fmt.Errorf("blocked: %s", host)
 	}
