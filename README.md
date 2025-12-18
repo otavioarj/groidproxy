@@ -1,4 +1,4 @@
-# Groid v1.3.0 – Golang Android Proxier
+# Groid v1.3.1 – Golang Android Proxier
 
 ## 📦 Usage
 
@@ -49,7 +49,7 @@
 
 ## Burp HTTP State machine
 
-Until Groid v1.2, there're bugs related to how Burp sends an EOF (end-of-file) after each HTTP/1.1 response. This was **Fixed** by version 1.3.
+Until Groid v1.2, there're bugs related to how Burp sends an EOF (end-of-file) after each HTTP/1.1 response, this was **fixed by version 1.3.0 :)**.
 If you encounter any issues while using Groid HTTP mode (-p http://), **OPEN** a ticket. In **v1.2** one of the following configs must be set to use HTTP mode (-p http://):
 - Proxy Settings -> Proxy listeners -> Request handling -> Support invisible proxying: **ON** (Best)
 - Proxy Settings -> Miscellaneous: Use keep-alvie for HTTP/1.1 **OFF** (Worst)
