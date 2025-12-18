@@ -169,7 +169,7 @@ func main() {
 
 		// Load TLS certificate if provided
 		if config.TLSCert != "" {
-			if err := loadP12Certificate(config.TLSCert, config.TLSPass); err != nil {
+			if err := loadPkcs12Certificate(config.TLSCert, config.TLSPass); err != nil {
 				fatal("Failed to load TLS certificate: %v", err)
 			}
 			logf("TLS interception enabled")
