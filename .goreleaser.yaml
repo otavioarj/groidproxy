@@ -1,0 +1,19 @@
+version: 2
+
+builds:
+  - ldflags:
+      - -s -w
+    flags:
+      - -trimpath
+    goos:
+      - linux      
+    goarch:
+      - arm
+      - arm64
+    goarm:
+      - "7"
+archives:
+  - name_template: '{{ .ProjectName }}_{{ .Version }}_android_{{ .Arch }}'
+    formats:
+      - tar.gz
+    
