@@ -16,7 +16,7 @@ import (
 
 const (
 	CHAIN_NAME      = "GROID_OUT"
-	VERSION         = "1.3.4"
+	VERSION         = "1.3.5"
 	SO_ORIGINAL_DST = 80
 	SESS_FILE       = ".groidf" // Session file, used to verify clean shutdown
 )
@@ -225,8 +225,8 @@ func main() {
 		applyGlobalRules()
 	} else {
 		for _, pkg := range config.Packages {
-			uid := getPackageUID(pkg)
-			if uid > 0 {
+			uids := getPackageUIDs(pkg)
+			for _, uid := range uids {
 				logf("Found package %s with UID %d", pkg, uid)
 				applyPackageRules(pkg, uid)
 			}

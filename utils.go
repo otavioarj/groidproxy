@@ -4,38 +4,49 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
 )
 
-func getPackageUID(pkg string) int {
-	// Try pm command
-	out, err := exec.Command("pm", "list", "packages", "-U", pkg).Output()
-	if err == nil {
-		for _, line := range strings.Split(string(out), "\n") {
-			if strings.Contains(line, pkg) && strings.Contains(line, "uid:") {
-				parts := strings.Fields(line)
-				for _, part := range parts {
-					if strings.HasPrefix(part, "uid:") {
-						uid, _ := strconv.Atoi(strings.TrimPrefix(part, "uid:"))
-						return uid
-					}
-				}
-			}
+// getPackageUIDs returns UIDs for a package across all Android users
+// Scans /data/user/<id>/<pkg> dirs and reads owner UID from each
+func getPackageUIDs(pkg string) []int {
+	var uids []int
+
+	users, err := os.ReadDir("/data/user")
+	if err != nil {
+		// Fallback to single-user path
+		if uid := statPackageUID("/data/data/" + pkg); uid > 0 {
+			uids = append(uids, uid)
+		}
+		if len(uids) == 0 {
+			fatal("Could not find UID for package %s", pkg)
+		}
+		return uids
+	}
+
+	for _, u := range users {
+		if uid := statPackageUID("/data/user/" + u.Name() + "/" + pkg); uid > 0 {
+			uids = append(uids, uid)
 		}
 	}
 
-	// Try stat /data/data/package
-	info, err := os.Stat("/data/data/" + pkg)
-	if err == nil {
-		if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-			return int(stat.Uid)
-		}
+	if len(uids) == 0 {
+		fatal("Could not find UID for package %s", pkg)
 	}
+	return uids
+}
 
-	fatal("Could not find UID for package %s", pkg)
+// statPackageUID reads owner UID from a package data dir, 0 if absent
+func statPackageUID(path string) int {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		return int(stat.Uid)
+	}
 	return 0
 }
 
