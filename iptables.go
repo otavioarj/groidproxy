@@ -46,10 +46,13 @@ func initChain() {
 	// Create custom chain
 	exec.Command("iptables", "-t", "nat", "-N", CHAIN_NAME).Run()
 
-	// Exclude connections FROM local proxy port
-	exec.Command("iptables", "-t", "nat", "-A", CHAIN_NAME,
-		"-p", "tcp", "--sport", strconv.Itoa(config.LocalPort),
-		"-j", "RETURN").Run()
+	// Exclude traffic from local proxy port to avoid redirect loop
+	// Only needed for http/socks5 modes that use the local listener
+	if config.ProxyType != "redirect" {
+		exec.Command("iptables", "-t", "nat", "-A", CHAIN_NAME,
+			"-p", "tcp", "--sport", strconv.Itoa(config.LocalPort),
+			"-j", "RETURN").Run()
+	}
 
 	// Add to OUTPUT
 	if err := exec.Command("iptables", "-t", "nat", "-C", "OUTPUT", "-j", CHAIN_NAME).Run(); err != nil {
@@ -88,6 +91,14 @@ func applyPackageRules(pkg string, uid int) {
 			"-j", "ACCEPT",
 			"-m", "comment", "--comment", comment)
 	}
+
+	// Block IPv6 for this UID to force IPv4 fallback
+	// iptables covers v4 only; REJECT makes dual-stack apps switch to v4 at once
+	// this avoid Happy Eyeballs (RFC 8305)!!
+	runCmd("ip6tables", "-A", "OUTPUT",
+		"-m", "owner", "--uid-owner", strconv.Itoa(uid),
+		"-j", "REJECT",
+		"-m", "comment", "--comment", comment)
 
 	// DNS redirect if enabled
 	if config.DNSRedirect {
@@ -133,21 +144,23 @@ func applyGlobalRules() {
 
 func removePackageRules(pkg string) {
 	comment := fmt.Sprintf("GROID:%s", pkg)
-	removeRulesWithComment("nat", CHAIN_NAME, comment)
-	removeRulesWithComment("nat", "POSTROUTING", comment)
-	removeRulesWithComment("filter", "INPUT", comment)
+	removeRulesWithComment("iptables", "nat", CHAIN_NAME, comment)
+	removeRulesWithComment("iptables", "nat", "POSTROUTING", comment)
+	removeRulesWithComment("iptables", "filter", "INPUT", comment)
+	removeRulesWithComment("ip6tables", "filter", "OUTPUT", comment)
 }
 
 func removeGlobalRules() {
 	comment := "GROID:global"
-	removeRulesWithComment("nat", CHAIN_NAME, comment)
-	removeRulesWithComment("nat", "POSTROUTING", comment)
-	removeRulesWithComment("filter", "INPUT", comment)
+	removeRulesWithComment("iptables", "nat", CHAIN_NAME, comment)
+	removeRulesWithComment("iptables", "nat", "POSTROUTING", comment)
+	removeRulesWithComment("iptables", "filter", "INPUT", comment)
 }
 
-func removeRulesWithComment(table, chain, comment string) {
+// removeRulesWithComment deletes tagged rules; cmd is iptables or ip6tables
+func removeRulesWithComment(cmd, table, chain, comment string) {
 	for {
-		out, _ := exec.Command("iptables", "-t", table, "-L", chain, "--line-numbers", "-n").Output()
+		out, _ := exec.Command(cmd, "-t", table, "-L", chain, "--line-numbers", "-n").Output()
 		lines := strings.Split(string(out), "\n")
 
 		removed := false
@@ -156,7 +169,7 @@ func removeRulesWithComment(table, chain, comment string) {
 				parts := strings.Fields(lines[i])
 				if len(parts) > 0 {
 					if num, err := strconv.Atoi(parts[0]); err == nil {
-						exec.Command("iptables", "-t", table, "-D", chain, strconv.Itoa(num)).Run()
+						exec.Command(cmd, "-t", table, "-D", chain, strconv.Itoa(num)).Run()
 						removed = true
 						break
 					}
@@ -172,27 +185,29 @@ func removeRulesWithComment(table, chain, comment string) {
 
 func flushRules() {
 	exec.Command("iptables", "-t", "nat", "-F", CHAIN_NAME).Run()
-	removeRulesWithComment("nat", "OUTPUT", "GROID:")
-	removeRulesWithComment("nat", "POSTROUTING", "GROID:")
-	removeRulesWithComment("filter", "INPUT", "GROID:")
+	removeRulesWithComment("iptables", "nat", "OUTPUT", "GROID:")
+	removeRulesWithComment("iptables", "nat", "POSTROUTING", "GROID:")
+	removeRulesWithComment("iptables", "filter", "INPUT", "GROID:")
+	removeRulesWithComment("ip6tables", "filter", "OUTPUT", "GROID:")
 	logf("All GROID rules flushed")
 }
 
 func listRules() {
 	fmt.Println("=== GROID Rules ===")
 
-	tables := []struct{ table, chain string }{
-		{"nat", CHAIN_NAME},
-		{"nat", "OUTPUT"},
-		{"nat", "POSTROUTING"},
-		{"filter", "INPUT"},
+	tables := []struct{ cmd, table, chain string }{
+		{"iptables", "nat", CHAIN_NAME},
+		{"iptables", "nat", "OUTPUT"},
+		{"iptables", "nat", "POSTROUTING"},
+		{"iptables", "filter", "INPUT"},
+		{"ip6tables", "filter", "OUTPUT"},
 	}
 
 	for _, tc := range tables {
 		out, _ := exec.Command("sh", "-c",
-			fmt.Sprintf("iptables -t %s -L %s -n -v | grep GROID", tc.table, tc.chain)).Output()
+			fmt.Sprintf("%s -t %s -L %s -n -v | grep GROID", tc.cmd, tc.table, tc.chain)).Output()
 		if len(out) > 0 {
-			fmt.Printf("\n%s table - %s chain:\n%s", tc.table, tc.chain, out)
+			fmt.Printf("\n%s %s table - %s chain:\n%s", tc.cmd, tc.table, tc.chain, out)
 		}
 	}
 }

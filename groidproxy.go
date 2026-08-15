@@ -16,7 +16,7 @@ import (
 
 const (
 	CHAIN_NAME      = "GROID_OUT"
-	VERSION         = "1.3.5"
+	VERSION         = "1.4.0"
 	SO_ORIGINAL_DST = 80
 	SESS_FILE       = ".groidf" // Session file, used to verify clean shutdown
 )
